@@ -52,6 +52,17 @@ type ProductForm = {
   unit_label: string;
 };
 
+// Opções padrão de venda para confeitaria
+const PRODUCT_UNIT_OPTIONS = [
+  { value: "un", label: "Unidade (un)" },
+  { value: "fatia", label: "Fatia" },
+  { value: "cento", label: "Cento" },
+  { value: "kg", label: "Quilo (kg)" },
+  { value: "g", label: "Grama (g)" },
+  { value: "L", label: "Litro (L)" },
+  { value: "ml", label: "Mililitro (ml)" },
+];
+
 export default function Recipes() {
   const [products, setProducts] = useState<Product[]>([]);
   const [ingredients, setIngredients] = useState<Ingredient[]>([]);
@@ -155,6 +166,7 @@ export default function Recipes() {
       });
       await loadBase();
       await loadComposition(selectedProduct.id);
+      alert("Dados do produto atualizados!");
     } catch (err: any) {
       alert(err?.response?.data?.error || "Erro ao atualizar produto.");
     }
@@ -232,6 +244,7 @@ export default function Recipes() {
       />
 
       <div className="grid gap-4 xl:grid-cols-3">
+        {/* COLUNA ESQUERDA - LISTA DE PRODUTOS E CRIAÇÃO */}
         <Card>
           <CardHeader>
             <CardTitle>Produtos</CardTitle>
@@ -249,15 +262,23 @@ export default function Recipes() {
                 <Input
                   type="number"
                   step="0.01"
-                  placeholder="Preço"
+                  placeholder="Preço (R$)"
                   value={newProduct.sale_price}
                   onChange={(e) => setNewProduct((s) => ({ ...s, sale_price: e.target.value }))}
                 />
-                <Input
-                  placeholder="un"
+                
+                {/* AQUI ESTÁ O DROPDOWN PARA NOVO PRODUTO */}
+                <select
+                  className="h-9 w-full rounded-md border bg-background px-3 text-sm"
                   value={newProduct.unit_label}
                   onChange={(e) => setNewProduct((s) => ({ ...s, unit_label: e.target.value }))}
-                />
+                >
+                  {PRODUCT_UNIT_OPTIONS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
               </div>
               <Button onClick={handleCreateProduct}>
                 <Plus className="mr-2 h-4 w-4" />
@@ -291,6 +312,7 @@ export default function Recipes() {
           </CardContent>
         </Card>
 
+        {/* COLUNA DIREITA - EDITOR DA FICHA TÉCNICA */}
         <Card className="xl:col-span-2">
           <CardHeader>
             <CardTitle>Editor da Ficha Técnica</CardTitle>
@@ -337,8 +359,11 @@ export default function Recipes() {
                     />
                   </div>
                   <div>
-                    <label className="mb-1 block text-sm font-medium">Unidade</label>
-                    <Input
+                    <label className="mb-1 block text-sm font-medium">Unidade de Venda</label>
+                    
+                    {/* AQUI ESTÁ O DROPDOWN PARA PRODUTO SELECIONADO */}
+                    <select
+                      className="h-9 w-full rounded-md border bg-background px-3 text-sm"
                       value={selectedProduct.unit_label}
                       onChange={(e) =>
                         setProducts((prev) =>
@@ -347,7 +372,13 @@ export default function Recipes() {
                           )
                         )
                       }
-                    />
+                    >
+                      {PRODUCT_UNIT_OPTIONS.map((opt) => (
+                        <option key={opt.value} value={opt.value}>
+                          {opt.label}
+                        </option>
+                      ))}
+                    </select>
                   </div>
 
                   <div className="md:col-span-4 flex justify-end">

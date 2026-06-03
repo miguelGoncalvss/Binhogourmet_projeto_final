@@ -10,6 +10,8 @@ import Inventory from "./pages/Inventory";
 import Recipes from "./pages/Recipes";
 import POS from "./pages/POS";
 import Finance from "./pages/Finance";
+import Clients from "./pages/Clients";
+import Kanban from "./pages/Kanban";
 
 export default function App() {
   return (
@@ -28,6 +30,8 @@ export default function App() {
             <Route path="/recipes" element={<Recipes />} />
             <Route path="/pos" element={<POS />} />
             <Route path="/finance" element={<Finance />} />
+            <Route path="/clients" element={<Clients />} />
+            <Route path="/kanban" element={<Kanban />} />
           </Route>
         </Route>
 

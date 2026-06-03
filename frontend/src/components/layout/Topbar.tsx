@@ -11,8 +11,10 @@ import { CakeSlice, ChevronDown, LogOut } from "lucide-react";
 
 const navItems = [
   { to: "/", label: "Dashboard" },
+  { to: "/kanban", label: "Cozinha" },
   { to: "/inventory", label: "Estoque" },
   { to: "/recipes", label: "Fichas Técnicas" },
+  { to: "/clients", label: "Clientes" }, 
   { to: "/pos", label: "PDV" },
   { to: "/finance", label: "Financeiro" },
 ];

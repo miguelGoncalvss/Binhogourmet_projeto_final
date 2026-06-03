@@ -47,19 +47,27 @@ export default function POS() {
   const [channel, setChannel] = useState("balcao");
   const [accountId, setAccountId] = useState<string>("");
 
+  const [clients, setClients] = useState<any[]>([]);
+  const [clientId, setClientId] = useState("");
+  
+  // NOVO: Controle da Data de Entrega
+  const [deliveryDate, setDeliveryDate] = useState("");
+
   const [creating, setCreating] = useState(false);
   const [stockError, setStockError] = useState<any[] | null>(null);
 
   async function loadData() {
-    const [pRes, aRes, oRes] = await Promise.all([
+    const [pRes, aRes, oRes, cRes] = await Promise.all([
       api.get<Product[]>("/products"),
       api.get<Account[]>("/accounts"),
       api.get<OrderListItem[]>("/orders"),
+      api.get<any[]>("/clients"),
     ]);
 
     setProducts(pRes.data.filter((p) => p.is_active));
     setAccounts(aRes.data);
     setRecentOrders(oRes.data.slice(0, 8));
+    setClients(cRes.data);
 
     if (!accountId && aRes.data.length > 0) {
       setAccountId(String(aRes.data[0].id));
@@ -117,11 +125,12 @@ export default function POS() {
     try {
       const payload = {
         customer_name: customerName.trim() || null,
+        client_id: clientId ? Number(clientId) : null,
         channel,
         order_type: channel === "encomenda" ? "encomenda" : "balcao",
-        status: "paid",
         account_id: accountId ? Number(accountId) : null,
-        create_financial_transaction: true,
+        // ENVIANDO A DATA PRO BACKEND:
+        delivery_date: deliveryDate ? new Date(deliveryDate).toISOString() : null, 
         items: cart.map((item) => ({
           product_id: item.product_id,
           quantity: Number(item.quantity),
@@ -131,9 +140,11 @@ export default function POS() {
 
       const { data } = await api.post("/orders", payload);
 
-      alert(`Pedido #${data.order.id} criado com sucesso!`);
+      alert(`Pedido #${data.order.id} criado com sucesso! Ele foi enviado para a Cozinha.`);
       setCart([]);
       setCustomerName("");
+      setClientId("");
+      setDeliveryDate(""); // Limpa o campo da data
       await loadData();
     } catch (err: any) {
       if (err?.response?.status === 409 && err?.response?.data?.details) {
@@ -189,27 +200,56 @@ export default function POS() {
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="grid gap-3">
-              <div>
-                <label className="mb-1 block text-sm font-medium">Cliente</label>
-                <Input
-                  value={customerName}
-                  onChange={(e) => setCustomerName(e.target.value)}
-                  placeholder="Opcional"
-                />
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="mb-1 block text-sm font-medium">Cliente (Cadastrado)</label>
+                  <select
+                    className="h-9 w-full rounded-md border bg-background px-3 text-sm"
+                    value={clientId}
+                    onChange={(e) => setClientId(e.target.value)}
+                  >
+                    <option value="">Nenhum / Avulso</option>
+                    {clients.map((c) => (
+                      <option key={c.id} value={c.id}>{c.name}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="mb-1 block text-sm font-medium">Nome Avulso</label>
+                  <Input
+                    value={customerName}
+                    disabled={!!clientId}
+                    onChange={(e) => setCustomerName(e.target.value)}
+                    placeholder="Opcional"
+                  />
+                </div>
               </div>
 
-              <div>
-                <label className="mb-1 block text-sm font-medium">Canal</label>
-                <select
-                  className="h-9 w-full rounded-md border bg-background px-3 text-sm"
-                  value={channel}
-                  onChange={(e) => setChannel(e.target.value)}
-                >
-                  <option value="balcao">Balcão</option>
-                  <option value="encomenda">Encomenda</option>
-                  <option value="whatsapp">WhatsApp</option>
-                  <option value="ifood">iFood</option>
-                </select>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="mb-1 block text-sm font-medium">Canal</label>
+                  <select
+                    className="h-9 w-full rounded-md border bg-background px-3 text-sm"
+                    value={channel}
+                    onChange={(e) => setChannel(e.target.value)}
+                  >
+                    <option value="balcao">Balcão</option>
+                    <option value="encomenda">Encomenda</option>
+                    <option value="whatsapp">WhatsApp</option>
+                    <option value="ifood">iFood</option>
+                  </select>
+                </div>
+                
+                {/* CAMPO DE DATA/HORA AQUI */}
+                <div>
+                  <label className="mb-1 block text-sm font-medium text-amber-700">Entrega (Opcional)</label>
+                  <Input 
+                    type="datetime-local" 
+                    className="h-9 text-xs" 
+                    value={deliveryDate} 
+                    onChange={(e) => setDeliveryDate(e.target.value)} 
+                  />
+                </div>
               </div>
 
               <div>
@@ -236,59 +276,41 @@ export default function POS() {
                 cart.map((item) => (
                   <div key={item.product_id} className="rounded-lg border p-2">
                     <p className="text-sm font-medium">{item.product_name}</p>
-                    <div className="mt-2 flex items-center gap-2">
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() =>
-                          updateCartItem(item.product_id, {
-                            quantity: Math.max(1, item.quantity - 1),
-                          })
-                        }
-                      >
-                        <Minus className="h-3 w-3" />
-                      </Button>
-                      <Input
-                        type="number"
-                        className="h-8"
-                        value={item.quantity}
-                        onChange={(e) =>
-                          updateCartItem(item.product_id, {
-                            quantity: Math.max(1, Number(e.target.value || 1)),
-                          })
-                        }
-                      />
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() =>
-                          updateCartItem(item.product_id, {
-                            quantity: item.quantity + 1,
-                          })
-                        }
-                      >
-                        <Plus className="h-3 w-3" />
-                      </Button>
-                    </div>
-
-                    <div className="mt-2 grid grid-cols-2 gap-2">
-                      <Input
-                        type="number"
-                        step="0.01"
-                        value={item.unit_price}
-                        onChange={(e) =>
-                          updateCartItem(item.product_id, {
-                            unit_price: Number(e.target.value || 0),
-                          })
-                        }
-                      />
-                      <div className="flex items-center justify-between rounded-md border px-2 text-sm">
-                        <span>Total</span>
-                        <strong>{formatCurrency(item.quantity * item.unit_price)}</strong>
+                    <div className="mt-2 flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() =>
+                            updateCartItem(item.product_id, {
+                              quantity: Math.max(1, item.quantity - 1),
+                            })
+                          }
+                        >
+                          <Minus className="h-3 w-3" />
+                        </Button>
+                        <Input
+                          type="number"
+                          className="h-8 w-16 text-center"
+                          value={item.quantity}
+                          onChange={(e) =>
+                            updateCartItem(item.product_id, {
+                              quantity: Math.max(1, Number(e.target.value || 1)),
+                            })
+                          }
+                        />
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() =>
+                            updateCartItem(item.product_id, {
+                              quantity: item.quantity + 1,
+                            })
+                          }
+                        >
+                          <Plus className="h-3 w-3" />
+                        </Button>
                       </div>
-                    </div>
-
-                    <div className="mt-2 flex justify-end">
                       <Button
                         variant="outline"
                         size="sm"
@@ -316,15 +338,13 @@ export default function POS() {
               </div>
             ) : null}
 
-            <div className="rounded-lg border p-3">
-              <div className="flex items-center justify-between text-sm">
-                <span>Total do pedido</span>
-                <span className="text-lg font-semibold">{formatCurrency(total)}</span>
-              </div>
+            <div className="rounded-lg border p-3 flex items-center justify-between text-sm">
+              <span>Total do pedido</span>
+              <span className="text-lg font-semibold">{formatCurrency(total)}</span>
             </div>
 
             <Button className="w-full" onClick={finalizeOrder} disabled={creating}>
-              {creating ? "Finalizando..." : "Finalizar pedido"}
+              {creating ? "Finalizando..." : "Enviar p/ Cozinha"}
             </Button>
           </CardContent>
         </Card>
@@ -355,7 +375,7 @@ export default function POS() {
                     <TableCell className="font-medium">#{order.id}</TableCell>
                     <TableCell>{order.customer_name || "Balcão"}</TableCell>
                     <TableCell>{order.channel}</TableCell>
-                    <TableCell>{order.status}</TableCell>
+                    <TableCell>{order.status === "todo" || order.status === "prep" || order.status === "ready" ? "Na Cozinha" : "Entregue"}</TableCell>
                     <TableCell>{formatCurrency(order.total_amount)}</TableCell>
                     <TableCell>{formatDateTime(order.created_at)}</TableCell>
                   </TableRow>

@@ -1,0 +1,6 @@
+serviceAccountKey.json
+.env
+node_modules/
+binho_estrutura.db
+binho_estrutura.db-shm
+binho_estrutura.db-wal

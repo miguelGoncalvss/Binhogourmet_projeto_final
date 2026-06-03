@@ -6,6 +6,10 @@ const sqlite3 = require('sqlite3');
 const { open } = require('sqlite');
 const path = require('path');
 
+// Novos imports para a leitura de nota fiscal
+const multer = require('multer');
+const Tesseract = require('tesseract.js');
+
 const PORT = process.env.PORT || 3001;
 const JWT_SECRET = process.env.JWT_SECRET || 'troque-essa-chave-em-producao';
 const DB_FILE = process.env.DB_FILE || path.join(__dirname, 'binho_estrutura.db');
@@ -13,6 +17,9 @@ const DB_FILE = process.env.DB_FILE || path.join(__dirname, 'binho_estrutura.db'
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: '2mb' }));
+
+// Configuração do multer para guardar a imagem na memória do Node temporariamente
+const upload = multer({ storage: multer.memoryStorage() });
 
 let db;
 
@@ -58,11 +65,16 @@ function convertToSpecificBase(quantity, inputUnit, targetBaseUnit) {
   if (!Number.isFinite(q)) throw new Error('Quantidade inválida.');
 
   const source = UNIT_META[normalizeUnitInput(inputUnit) || ''];
-  if (!source) throw new Error('Unidade inválida.');
-  if (source.base_unit !== targetBaseUnit) {
-    throw new Error(`Unidade incompatível com o insumo (base: ${targetBaseUnit}).`);
+  if (!source) throw new Error('Unidade de entrada inválida.');
+
+  const target = UNIT_META[normalizeUnitInput(targetBaseUnit) || ''];
+  if (!target) throw new Error('Unidade de destino inválida.');
+
+  if (source.base_unit !== target.base_unit) {
+    throw new Error(`Unidade incompatível com o insumo (esperado família do ${target.base_unit}).`);
   }
-  return q * source.factor_to_base;
+
+  return (q * source.factor_to_base) / target.factor_to_base;
 }
 
 function monthRangeUtc(year, month) {
@@ -82,6 +94,71 @@ function yearRangeUtc(year) {
 
 function monthLabel(year, month) {
   return `${String(month).padStart(2, '0')}/${year}`;
+}
+
+// ==========================================
+// FUNÇÃO PARA GARIMPAR NOTA FISCAL
+// ==========================================
+function parseReceiptText(text) {
+  const lines = text.split('\n').map(line => line.trim()).filter(line => line.length > 0);
+  const itemsMap = new Map();
+  let totalPurchase = 0;
+
+  const pricePattern = /(?:(\d*)\s*(UN|IUN|KG|G|L)[\s,\.\—\-]*)?(\d+[\.,]\d{2})[\s\.\—\-]+(\d+[\.,]\d{2})\s*.*?$/i;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const match = line.match(pricePattern);
+
+    if (match) {
+      let qty = parseInt(match[1], 10);
+      if (isNaN(qty)) qty = 1;
+
+      const unitPrice = parseFloat(match[3].replace(',', '.'));
+      const totalPrice = parseFloat(match[4].replace(',', '.'));
+
+      let itemName = line.replace(match[0], '').trim();
+
+      if (itemName.length < 5 && i > 0) {
+        itemName = lines[i - 1];
+      }
+
+      const nameMatch = itemName.match(/[A-Z]{2,}.*$/);
+      if (nameMatch) {
+        itemName = nameMatch[0];
+      }
+
+      itemName = itemName.replace(/\s+[^A-Z0-9]{1,2}$/i, '').trim();
+
+      let normalizedName = itemName.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toUpperCase();
+      let groupKey = normalizedName.split(' ').slice(0, 3).join(' ');
+
+      if (itemsMap.has(groupKey)) {
+        const existingItem = itemsMap.get(groupKey);
+        existingItem.quantity += qty;
+        existingItem.total_price += totalPrice;
+      } else {
+        itemsMap.set(groupKey, {
+          name: normalizedName,
+          quantity: qty,
+          unit_price: unitPrice,
+          total_price: totalPrice
+        });
+      }
+    }
+
+    if (line.toUpperCase().includes('PAGAR R$') || line.toUpperCase().includes('VALOR PAGO')) {
+       const totalMatch = line.match(/(\d+,\d{2})/);
+       if (totalMatch) {
+           totalPurchase = parseFloat(totalMatch[1].replace(',', '.'));
+       }
+    }
+  }
+
+  return {
+    items: Array.from(itemsMap.values()),
+    total_purchase: totalPurchase
+  };
 }
 
 function authRequired(req, res, next) {
@@ -124,6 +201,16 @@ async function initDatabase() {
       type TEXT DEFAULT 'Conta Corrente',
       opening_balance REAL DEFAULT 0,
       is_active INTEGER DEFAULT 1,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS clients (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      phone TEXT,
+      email TEXT,
+      notes TEXT,
       created_at TEXT DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT DEFAULT CURRENT_TIMESTAMP
     );
@@ -196,16 +283,19 @@ async function initDatabase() {
     CREATE TABLE IF NOT EXISTS orders (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       customer_name TEXT,
+      client_id INTEGER,
       channel TEXT NOT NULL DEFAULT 'balcao',
       order_type TEXT NOT NULL DEFAULT 'balcao',
-      status TEXT NOT NULL DEFAULT 'paid',
+      status TEXT NOT NULL DEFAULT 'todo',
       account_id INTEGER,
       total_amount REAL NOT NULL DEFAULT 0,
       total_cost REAL NOT NULL DEFAULT 0,
       notes TEXT,
+      delivery_date TEXT,
       created_at TEXT DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (account_id) REFERENCES accounts(id)
+      FOREIGN KEY (account_id) REFERENCES accounts(id),
+      FOREIGN KEY (client_id) REFERENCES clients(id)
     );
 
     CREATE TABLE IF NOT EXISTS order_items (
@@ -256,7 +346,7 @@ async function initDatabase() {
     );
   `);
 
-  // Migrações seguras (caso o banco antigo não tenha algumas colunas)
+  // Migrações seguras
   async function safeAlter(sql) {
     try {
       await db.exec(sql);
@@ -285,6 +375,8 @@ async function initDatabase() {
   await safeAlter(`ALTER TABLE transactions ADD COLUMN source_order_id INTEGER`);
   await safeAlter(`ALTER TABLE order_items ADD COLUMN unit_cost_snapshot REAL DEFAULT 0`);
   await safeAlter(`ALTER TABLE order_items ADD COLUMN line_cost REAL DEFAULT 0`);
+  await safeAlter(`ALTER TABLE orders ADD COLUMN client_id INTEGER`);
+  await safeAlter(`ALTER TABLE orders ADD COLUMN delivery_date TEXT`);
 
   await db.exec(`
     UPDATE ingredients
@@ -318,7 +410,7 @@ async function initDatabase() {
 
   await seedDefaults();
   await ensureDasRows(new Date().getUTCFullYear());
-  await ensureDasRows(2026); // deixa preparado para a tela do MEI 2026
+  await ensureDasRows(2026);
 }
 
 async function seedDefaults() {
@@ -369,7 +461,7 @@ async function seedDefaults() {
 async function ensureDasRows(year) {
   const y = Number(year);
   for (let month = 1; month <= 12; month++) {
-    const dueDate = new Date(Date.UTC(y, month, 20, 12, 0, 0)).toISOString(); // dia 20 do mês seguinte
+    const dueDate = new Date(Date.UTC(y, month, 20, 12, 0, 0)).toISOString();
     await db.run(
       `INSERT OR IGNORE INTO das_payments (year, month, status, due_date, amount, created_at, updated_at)
        VALUES (?, ?, 'pending', ?, NULL, ?, ?)`,
@@ -704,8 +796,103 @@ app.delete('/categories/:id', async (req, res, next) => {
 });
 
 // ===============================
-// INGREDIENTS (compatível com frontend atual e versão nova)
+// CLIENTS
 // ===============================
+app.get('/clients', async (_req, res, next) => {
+  try {
+    const rows = await db.all(`SELECT * FROM clients ORDER BY name ASC`);
+    res.json(rows || []);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// NOVA ROTA DE HISTÓRICO DO CLIENTE
+app.get('/clients/:id/history', async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const orders = await db.all(`
+      SELECT id, status, channel, total_amount, created_at, delivery_date 
+      FROM orders WHERE client_id = ? ORDER BY created_at DESC
+    `, [id]);
+    
+    const stats = await db.get(`
+      SELECT COUNT(id) as total_orders, COALESCE(SUM(total_amount), 0) as total_spent 
+      FROM orders WHERE client_id = ? AND status = 'delivered'
+    `, [id]);
+    
+    res.json({ orders, stats });
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.post('/clients', async (req, res, next) => {
+  try {
+    const { name, phone, email, notes } = req.body || {};
+    if (!String(name || '').trim()) return res.status(400).json({ error: 'Nome do cliente é obrigatório.' });
+
+    const result = await db.run(
+      `INSERT INTO clients (name, phone, email, notes, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`,
+      [String(name).trim(), phone ? String(phone).trim() : null, email ? String(email).trim() : null, notes ? String(notes) : null, nowIso(), nowIso()]
+    );
+    const row = await db.get(`SELECT * FROM clients WHERE id = ?`, [result.lastID]);
+    res.status(201).json(row);
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.put('/clients/:id', async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { name, phone, email, notes } = req.body || {};
+
+    await db.run(
+      `UPDATE clients SET name = ?, phone = ?, email = ?, notes = ?, updated_at = ? WHERE id = ?`,
+      [String(name || '').trim(), phone ? String(phone).trim() : null, email ? String(email).trim() : null, notes ? String(notes) : null, nowIso(), id]
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.delete('/clients/:id', async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    await db.run(`UPDATE orders SET client_id = NULL WHERE client_id = ?`, [id]); // Remove o vínculo sem apagar o pedido
+    await db.run(`DELETE FROM clients WHERE id = ?`, [id]);
+    res.json({ ok: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ===============================
+// INGREDIENTS
+// ===============================
+app.post('/ingredients/extract-receipt', upload.single('receipt'), async (req, res, next) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'Nenhuma imagem enviada. Mande o arquivo no campo "receipt".' });
+    }
+
+    console.log('Iniciando leitura da nota via OCR...');
+    
+    const { data: { text } } = await Tesseract.recognize(
+      req.file.buffer,
+      'por' 
+    );
+
+    const extractedData = parseReceiptText(text);
+    
+    res.json(extractedData);
+  } catch (err) {
+    next(err);
+  }
+});
+
 app.get('/ingredients', async (_req, res, next) => {
   try {
     const rows = await db.all(
@@ -880,51 +1067,59 @@ app.delete('/ingredients/:id', async (req, res, next) => {
 
 app.post('/ingredients/purchase', async (req, res, next) => {
   try {
-    const { ingredient_id, quantity, purchase_unit, total_cost, note } = req.body || {};
-    if (!ingredient_id || !quantity || !purchase_unit || !total_cost) {
-      return res.status(400).json({
-        error: 'Campos obrigatórios: ingredient_id, quantity, purchase_unit, total_cost.',
-      });
+    const { items } = req.body || {};
+    
+    if (!Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({ error: 'Nenhum item na compra.' });
     }
 
-    const ingredient = await db.get(`SELECT * FROM ingredients WHERE id = ?`, [ingredient_id]);
-    if (!ingredient) return res.status(404).json({ error: 'Insumo não encontrado.' });
-
-    const qtyBase = convertToSpecificBase(quantity, purchase_unit, ingredient.base_unit || ingredient.unit);
-    if (qtyBase <= 0) return res.status(400).json({ error: 'Quantidade inválida.' });
-
-    const totalCostNum = toNumber(total_cost, 0);
-    if (totalCostNum <= 0) return res.status(400).json({ error: 'Valor total inválido.' });
-
-    const unitCost = totalCostNum / qtyBase;
-    const newStock = toNumber(ingredient.stock_qty_base ?? ingredient.stock_qty, 0) + qtyBase;
-
     await runInTransaction(async () => {
-      await db.run(
-        `UPDATE ingredients
-         SET stock_qty = ?, stock_qty_base = ?, cost_per_unit = ?, last_cost_per_base_unit = ?, unit = ?, updated_at = ?
-         WHERE id = ?`,
-        [newStock, newStock, unitCost, unitCost, ingredient.base_unit || ingredient.unit, nowIso(), ingredient_id]
-      );
+      for (const item of items) {
+        const { ingredient_id, quantity, purchase_unit, total_cost, note } = item;
+        
+        if (!ingredient_id || !quantity || !purchase_unit || !total_cost) {
+          throw new Error('Campos obrigatórios ausentes em um dos itens.');
+        }
 
-      await db.run(
-        `INSERT INTO stock_movements
-         (ingredient_id, movement_type, quantity_base, unit_base, unit_cost_base, total_cost, note, created_at)
-         VALUES (?, 'purchase', ?, ?, ?, ?, ?, ?)`,
-        [
-          ingredient_id,
-          qtyBase,
-          ingredient.base_unit || ingredient.unit,
-          unitCost,
-          totalCostNum,
-          note || `Compra: ${quantity} ${purchase_unit}`,
-          nowIso(),
-        ]
-      );
+        const ingredient = await db.get(`SELECT * FROM ingredients WHERE id = ?`, [ingredient_id]);
+        if (!ingredient) throw new Error(`Insumo não encontrado (ID: ${ingredient_id}).`);
+
+        const qtyBase = convertToSpecificBase(quantity, purchase_unit, ingredient.base_unit || ingredient.unit);
+        if (qtyBase <= 0) throw new Error(`Quantidade inválida para o insumo ${ingredient.name}.`);
+
+        const totalCostNum = toNumber(total_cost, 0);
+        if (totalCostNum <= 0) throw new Error(`Valor total inválido para o insumo ${ingredient.name}.`);
+
+        const unitCost = totalCostNum / qtyBase;
+        const newStock = toNumber(ingredient.stock_qty_base ?? ingredient.stock_qty, 0) + qtyBase;
+
+        // Atualiza o estoque e o custo do insumo
+        await db.run(
+          `UPDATE ingredients
+           SET stock_qty = ?, stock_qty_base = ?, cost_per_unit = ?, last_cost_per_base_unit = ?, unit = ?, updated_at = ?
+           WHERE id = ?`,
+          [newStock, newStock, unitCost, unitCost, ingredient.base_unit || ingredient.unit, nowIso(), ingredient_id]
+        );
+
+        // Salva o histórico de movimentação
+        await db.run(
+          `INSERT INTO stock_movements
+           (ingredient_id, movement_type, quantity_base, unit_base, unit_cost_base, total_cost, note, created_at)
+           VALUES (?, 'purchase', ?, ?, ?, ?, ?, ?)`,
+          [
+            ingredient_id,
+            qtyBase,
+            ingredient.base_unit || ingredient.unit,
+            unitCost,
+            totalCostNum,
+            note || `Compra Múltipla: ${quantity} ${purchase_unit}`,
+            nowIso(),
+          ]
+        );
+      }
     });
 
-    const updated = await db.get(`SELECT * FROM ingredients WHERE id = ?`, [ingredient_id]);
-    res.json({ ok: true, ingredient: updated });
+    res.json({ ok: true });
   } catch (err) {
     next(err);
   }
@@ -1224,16 +1419,44 @@ app.get('/finance/dre', async (req, res, next) => {
 });
 
 // ===============================
-// ORDERS / POS
+// ORDERS E KANBAN
 // ===============================
 app.get('/orders', async (_req, res, next) => {
   try {
     const rows = await db.all(
-      `SELECT id, customer_name, status, channel, total_amount, total_cost, created_at
+      `SELECT id, customer_name, client_id, status, channel, total_amount, total_cost, created_at
        FROM orders
-       ORDER BY datetime(created_at) DESC, id DESC`
+       ORDER BY datetime(created_at) DESC, id DESC
+       LIMIT 50`
     );
     res.json(rows || []);
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.get('/kanban/orders', async (_req, res, next) => {
+  try {
+    const orders = await db.all(`
+      SELECT o.*, c.name as client_name
+      FROM orders o
+      LEFT JOIN clients c ON c.id = o.client_id
+      WHERE o.status IN ('todo', 'prep', 'ready')
+      ORDER BY o.delivery_date ASC, o.created_at ASC
+    `);
+    const items = await db.all(`
+      SELECT oi.*, p.name as product_name
+      FROM order_items oi
+      JOIN products p ON p.id = oi.product_id
+      WHERE oi.order_id IN (SELECT id FROM orders WHERE status IN ('todo', 'prep', 'ready'))
+    `);
+    
+    const mapped = orders.map(o => ({
+      ...o,
+      items: items.filter(i => i.order_id === o.id)
+    }));
+    
+    res.json(mapped);
   } catch (err) {
     next(err);
   }
@@ -1245,106 +1468,40 @@ app.post('/orders', async (req, res, next) => {
     const items = Array.isArray(body.items) ? body.items : [];
     if (!items.length) return res.status(400).json({ error: 'Pedido sem itens.' });
 
-    // Carrega produtos, composições e valida estoque
-    const productCache = new Map();
-    const productCostCache = new Map();
-    const ingredientNeeds = new Map();
-    const normalizedItems = [];
     let totalAmount = 0;
     let totalCost = 0;
+    const normalizedItems = [];
 
     for (const item of items) {
-      const productId = Number(item.product_id);
-      const quantity = toNumber(item.quantity, 0);
-      const unitPrice = toNumber(item.unit_price, 0);
-      if (!productId || quantity <= 0) {
-        return res.status(400).json({ error: 'Item inválido no pedido.' });
-      }
-
-      let product = productCache.get(productId);
-      if (!product) {
-        product = await db.get(`SELECT * FROM products WHERE id = ?`, [productId]);
-        if (!product) return res.status(400).json({ error: `Produto ${productId} não encontrado.` });
-        productCache.set(productId, product);
-      }
-
-      const costSummary = await getProductCostSummary(productId);
-      productCostCache.set(productId, costSummary);
-      if (!Array.isArray(costSummary.composition) || costSummary.composition.length === 0) {
-        return res.status(400).json({ error: `Produto "${product.name}" está sem ficha técnica.` });
-      }
-
-      for (const comp of costSummary.composition) {
-        const factor = 1 + toNumber(comp.waste_pct, 0) / 100;
-        const required = quantity * toNumber(comp.quantity, 0) * factor;
-        const prev = ingredientNeeds.get(comp.ingredient_id) || {
-          ingredient_id: comp.ingredient_id,
-          ingredient_name: comp.ingredient_name,
-          unit: comp.unit,
-          required: 0,
-        };
-        prev.required += required;
-        ingredientNeeds.set(comp.ingredient_id, prev);
-      }
-
-      const lineTotal = quantity * unitPrice;
-      const lineCost = quantity * toNumber(costSummary.calculated_cost, 0);
+      const costSummary = await getProductCostSummary(item.product_id);
+      const lineTotal = item.quantity * item.unit_price;
+      const lineCost = item.quantity * toNumber(costSummary.calculated_cost, 0);
       totalAmount += lineTotal;
       totalCost += lineCost;
-
       normalizedItems.push({
-        product_id: productId,
-        quantity,
-        unit_price: unitPrice,
+        ...item,
         line_total: lineTotal,
-        unit_cost_snapshot: toNumber(costSummary.calculated_cost, 0),
-        line_cost: lineCost,
+        unit_cost_snapshot: costSummary.calculated_cost,
+        line_cost: lineCost
       });
     }
 
-    // Verifica estoque
-    const stockIssues = [];
-    for (const need of ingredientNeeds.values()) {
-      const ing = await db.get(
-        `SELECT id, name, COALESCE(unit, base_unit, 'un') AS unit, COALESCE(stock_qty, stock_qty_base, 0) AS stock_qty
-         FROM ingredients WHERE id = ?`,
-        [need.ingredient_id]
-      );
-      const available = toNumber(ing?.stock_qty, 0);
-      if (available < need.required) {
-        stockIssues.push({
-          ingredient_id: need.ingredient_id,
-          ingredient_name: need.ingredient_name,
-          unit: need.unit,
-          stock_required: need.required,
-          stock_available: available,
-        });
-      }
-    }
-
-    if (stockIssues.length) {
-      return res.status(409).json({
-        error: 'Estoque insuficiente para concluir o pedido.',
-        details: stockIssues,
-      });
-    }
-
-    const salesCategory = await getCategoryByName('Vendas');
-
+    // Cria o pedido apenas como TODO - SEM DESCONTAR ESTOQUE E SEM FINANCEIRO AINDA
     const result = await runInTransaction(async () => {
       const orderInsert = await db.run(
         `INSERT INTO orders
-         (customer_name, channel, order_type, status, account_id, total_amount, total_cost, notes, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (customer_name, client_id, channel, order_type, status, account_id, total_amount, total_cost, notes, delivery_date, created_at, updated_at)
+         VALUES (?, ?, ?, ?, 'todo', ?, ?, ?, ?, ?, ?, ?)`,
         [
           body.customer_name ? String(body.customer_name) : null,
+          body.client_id ? Number(body.client_id) : null,
           String(body.channel || 'balcao'),
           String(body.order_type || 'balcao'),
-          String(body.status || 'paid'),
           body.account_id ? Number(body.account_id) : null,
           totalAmount,
           totalCost,
           body.notes ? String(body.notes) : null,
+          body.delivery_date ? new Date(body.delivery_date).toISOString() : null, // AQUI GRAVA A DATA DA ENTREGA
           nowIso(),
           nowIso(),
         ]
@@ -1368,65 +1525,92 @@ app.post('/orders', async (req, res, next) => {
           ]
         );
       }
-
-      for (const need of ingredientNeeds.values()) {
-        const ing = await db.get(`SELECT * FROM ingredients WHERE id = ?`, [need.ingredient_id]);
-        const currentStock = toNumber(ing.stock_qty ?? ing.stock_qty_base, 0);
-        const newStock = currentStock - need.required;
-        await db.run(
-          `UPDATE ingredients
-           SET stock_qty = ?, stock_qty_base = ?, updated_at = ?
-           WHERE id = ?`,
-          [newStock, newStock, nowIso(), need.ingredient_id]
-        );
-
-        await db.run(
-          `INSERT INTO stock_movements
-           (ingredient_id, movement_type, quantity_base, unit_base, unit_cost_base, total_cost, note, created_at)
-           VALUES (?, 'sale_consumption', ?, ?, ?, ?, ?, ?)`,
-          [
-            need.ingredient_id,
-            -Math.abs(need.required),
-            ing.base_unit || ing.unit || 'un',
-            toNumber(ing.cost_per_unit ?? ing.last_cost_per_base_unit, 0),
-            Math.abs(need.required) * toNumber(ing.cost_per_unit ?? ing.last_cost_per_base_unit, 0),
-            `Consumo no pedido #${orderId}`,
-            nowIso(),
-          ]
-        );
-      }
-
-      if (body.create_financial_transaction) {
-        await db.run(
-          `INSERT INTO transactions
-           (type, amount, description, account_id, category_id, occurred_at, is_personal_withdrawal, affects_mei_revenue, source, source_order_id, created_at, updated_at)
-           VALUES ('income', ?, ?, ?, ?, ?, 0, 1, 'order_auto', ?, ?, ?)`,
-          [
-            totalAmount,
-            `Venda pedido #${orderId}`,
-            body.account_id ? Number(body.account_id) : null,
-            salesCategory?.id || null,
-            nowIso(),
-            orderId,
-            nowIso(),
-            nowIso(),
-          ]
-        );
-      }
-
-      const order = await db.get(`SELECT * FROM orders WHERE id = ?`, [orderId]);
-      return { order };
+      return { orderId };
     });
 
     res.status(201).json({
       ok: true,
-      ...result,
-      totals: {
-        total_amount: totalAmount,
-        total_cost: totalCost,
-        margin_amount: totalAmount - totalCost,
-      },
+      order: { id: result.orderId }
     });
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.put('/orders/:id/status', async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { status } = req.body;
+
+    const order = await db.get(`SELECT * FROM orders WHERE id = ?`, [id]);
+    if (!order) return res.status(404).json({ error: 'Pedido não encontrado.' });
+
+    // Quando o pedido finalmente for entregue, ai sim a gente desconta o estoque e fita o financeiro
+    if (status === 'delivered' && order.status !== 'delivered') {
+      await runInTransaction(async () => {
+        const items = await db.all(`SELECT product_id, quantity FROM order_items WHERE order_id = ?`, [id]);
+        const ingredientNeeds = new Map();
+
+        // Calcula o que gastou
+        for (const item of items) {
+          const costSummary = await getProductCostSummary(item.product_id);
+          for (const comp of costSummary.composition) {
+            const factor = 1 + toNumber(comp.waste_pct, 0) / 100;
+            const required = item.quantity * toNumber(comp.quantity, 0) * factor;
+            const prev = ingredientNeeds.get(comp.ingredient_id) || { required: 0 };
+            prev.required += required;
+            ingredientNeeds.set(comp.ingredient_id, prev);
+          }
+        }
+
+        // Debita do estoque
+        for (const [ingId, need] of ingredientNeeds.entries()) {
+          const ing = await db.get(`SELECT * FROM ingredients WHERE id = ?`, [ingId]);
+          if (!ing) continue;
+
+          const newStock = toNumber(ing.stock_qty ?? ing.stock_qty_base, 0) - need.required;
+          
+          await db.run(
+            `UPDATE ingredients SET stock_qty = ?, stock_qty_base = ?, updated_at = ? WHERE id = ?`,
+            [newStock, newStock, nowIso(), ingId]
+          );
+          
+          await db.run(
+            `INSERT INTO stock_movements (ingredient_id, movement_type, quantity_base, unit_base, unit_cost_base, total_cost, note, created_at)
+             VALUES (?, 'sale_consumption', ?, ?, ?, ?, ?, ?)`,
+            [
+              ingId,
+              -Math.abs(need.required),
+              ing.base_unit || ing.unit,
+              toNumber(ing.cost_per_unit, 0),
+              Math.abs(need.required) * toNumber(ing.cost_per_unit, 0),
+              `Consumo Kanban #${id}`,
+              nowIso()
+            ]
+          );
+        }
+
+        // Joga o dinheiro no caixa
+        const salesCategory = await getCategoryByName('Vendas');
+        await db.run(
+          `INSERT INTO transactions (type, amount, description, account_id, category_id, occurred_at, is_personal_withdrawal, affects_mei_revenue, source, source_order_id, created_at, updated_at)
+           VALUES ('income', ?, ?, ?, ?, ?, 0, 1, 'order_auto', ?, ?, ?)`,
+          [
+            order.total_amount,
+            `Venda pedido #${id}`,
+            order.account_id,
+            salesCategory?.id || null,
+            nowIso(),
+            id,
+            nowIso(),
+            nowIso()
+          ]
+        );
+      });
+    }
+
+    await db.run(`UPDATE orders SET status = ?, updated_at = ? WHERE id = ?`, [status, nowIso(), id]);
+    res.json({ ok: true });
   } catch (err) {
     next(err);
   }
@@ -1463,7 +1647,6 @@ app.get('/mei/status', async (req, res, next) => {
       else das_stats.pending += Number(row.total || 0);
     }
 
-    // Regra vigente 2026 (limite anual MEI permanece R$ 81.000)
     const mei_limit = 81000;
     const business_revenue = toNumber(sums?.business_revenue, 0);
     const business_expenses = toNumber(sums?.business_expenses, 0);
@@ -1553,6 +1736,14 @@ app.get('/dashboard/summary', async (req, res, next) => {
       [startIso, endIso]
     );
 
+    const activeOrders = await db.all(`
+      SELECT o.id, o.customer_name, o.channel, o.status, o.total_amount, o.delivery_date, c.name as client_name
+      FROM orders o
+      LEFT JOIN clients c ON c.id = o.client_id
+      WHERE o.status IN ('todo', 'prep', 'ready')
+      ORDER BY o.created_at ASC
+    `);
+
     const topProducts = await db.all(
       `SELECT
          oi.product_id,
@@ -1568,6 +1759,21 @@ app.get('/dashboard/summary', async (req, res, next) => {
        GROUP BY oi.product_id, p.name
        ORDER BY qty_sold DESC, revenue DESC
        LIMIT 10`,
+      [startIso, endIso]
+    );
+
+    const topClients = await db.all(
+      `SELECT
+         c.id AS client_id,
+         COALESCE(c.name, o.customer_name, 'Balcão / Não identificado') AS client_name,
+         COUNT(o.id) AS order_count,
+         COALESCE(SUM(o.total_amount), 0) AS total_spent
+       FROM orders o
+       LEFT JOIN clients c ON c.id = o.client_id
+       WHERE datetime(o.created_at) >= datetime(?) AND datetime(o.created_at) < datetime(?)
+       GROUP BY c.id, o.customer_name
+       ORDER BY total_spent DESC
+       LIMIT 5`,
       [startIso, endIso]
     );
 
@@ -1650,7 +1856,9 @@ app.get('/dashboard/summary', async (req, res, next) => {
         min_stock_qty: toNumber(r.min_stock_qty, 0),
         shortage: Math.max(0, toNumber(r.shortage, 0)),
       })),
+      top_clients: topClients || [],
       monthly_trend,
+      active_orders: activeOrders || []
     });
   } catch (err) {
     next(err);

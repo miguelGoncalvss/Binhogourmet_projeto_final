@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { Link } from "react-router-dom";
 import api from "../services/api";
 import PageHeader from "../components/layout/PageHeader";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../components/ui/card";
@@ -15,9 +16,24 @@ import {
   Tooltip,
   XAxis,
   YAxis,
+  Cell
 } from "recharts";
-import { AlertTriangle, Box, DollarSign, Percent, TrendingUp } from "lucide-react";
+import { AlertTriangle, Box, DollarSign, Percent, TrendingUp, ChefHat } from "lucide-react";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
+
+// Paleta de cores para deixar o gráfico mais bonito
+const COLORS = [
+  "#3b82f6", // Azul
+  "#10b981", // Verde
+  "#f59e0b", // Amarelo
+  "#ef4444", // Vermelho
+  "#8b5cf6", // Roxo
+  "#ec4899", // Rosa
+  "#06b6d4", // Ciano
+  "#f97316", // Laranja
+  "#84cc16", // Lima
+  "#14b8a6", // Teal
+];
 
 type DashboardResponse = {
   cards: {
@@ -47,6 +63,20 @@ type DashboardResponse = {
     month: string;
     revenue: number;
     expenses: number;
+  }>;
+  top_clients: Array<{
+    client_id: number;
+    client_name: string;
+    order_count: number;
+    total_spent: number;
+  }>;
+  active_orders?: Array<{
+    id: number;
+    customer_name: string | null;
+    client_name: string | null;
+    channel: string;
+    status: string;
+    total_amount: number;
   }>;
 };
 
@@ -193,6 +223,57 @@ export default function Dashboard() {
             />
           </div>
 
+          {/* BANNER DE ATENÇÃO NA COZINHA */}
+          {summary.active_orders && summary.active_orders.length > 0 && (
+            <div className="flex items-center justify-between rounded-lg border border-amber-200 bg-amber-50 p-4 text-amber-900 shadow-sm">
+              <div className="flex items-center gap-3">
+                <div className="rounded-full bg-amber-200 p-2">
+                  <ChefHat className="h-6 w-6 text-amber-700" />
+                </div>
+                <div>
+                  <p className="font-bold">Atenção na Cozinha!</p>
+                  <p className="text-sm">Você tem {summary.active_orders.length} pedido(s) aguardando preparo ou entrega.</p>
+                </div>
+              </div>
+              <Link to="/kanban" className="rounded-md bg-amber-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-amber-700">
+                Ir para a Cozinha
+              </Link>
+            </div>
+          )}
+
+          <Card>
+            <CardHeader>
+              <CardTitle>Top Clientes (Receita)</CardTitle>
+              <CardDescription>Quem mais comprou este mês</CardDescription>
+            </CardHeader>
+            <CardContent>
+              {summary.top_clients && summary.top_clients.length === 0 ? (
+                <p className="text-sm text-muted-foreground">Sem vendas no período.</p>
+              ) : (
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Cliente</TableHead>
+                      <TableHead>Pedidos</TableHead>
+                      <TableHead className="text-right">Total Gasto</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {summary.top_clients?.map((c, i) => (
+                      <TableRow key={i}>
+                        <TableCell className="font-medium">{c.client_name}</TableCell>
+                        <TableCell>{c.order_count}</TableCell>
+                        <TableCell className="text-right text-primary font-bold">
+                          {formatCurrency(c.total_spent)}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              )}
+            </CardContent>
+          </Card>
+
           <div className="grid gap-4 xl:grid-cols-3">
             <Card className="xl:col-span-2">
               <CardHeader>
@@ -297,15 +378,17 @@ export default function Dashboard() {
                       <XAxis dataKey="product_name" hide />
                       <YAxis />
                       <Tooltip
-                        formatter={(value: number, name: string) =>
-                          name === "qty_sold" ? formatNumber(value) : formatCurrency(value)
-                        }
+                        formatter={(value: number) => formatNumber(value)}
                         labelFormatter={(_, payload) =>
                           payload?.[0]?.payload?.product_name || "Produto"
                         }
                       />
                       <Legend />
-                      <Bar dataKey="qty_sold" name="Qtd. vendida" />
+                      <Bar dataKey="qty_sold" name="Qtd. vendida" radius={[4, 4, 0, 0]}>
+                        {summary.top_products.map((entry, index) => (
+                          <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
+                        ))}
+                      </Bar>
                     </BarChart>
                   </ResponsiveContainer>
                 )}
