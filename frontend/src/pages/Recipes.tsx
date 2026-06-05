@@ -9,7 +9,7 @@ import { Plus, Save, Trash2 } from "lucide-react";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
 
 type Product = {
-  id: number;
+  id: string;
   name: string;
   sale_price: number;
   unit_label: string;
@@ -18,14 +18,14 @@ type Product = {
 };
 
 type Ingredient = {
-  id: number;
+  id: string;
   name: string;
   unit: string;
   cost_per_unit: number;
 };
 
 type CompositionItem = {
-  ingredient_id: number;
+  ingredient_id: string;
   quantity: number;
   waste_pct: number;
 };
@@ -33,7 +33,7 @@ type CompositionItem = {
 type CompositionResponse = {
   product: Product;
   composition: Array<{
-    ingredient_id: number;
+    ingredient_id: string;
     quantity: number;
     waste_pct: number;
     ingredient_name: string;
@@ -66,7 +66,7 @@ const PRODUCT_UNIT_OPTIONS = [
 export default function Recipes() {
   const [products, setProducts] = useState<Product[]>([]);
   const [ingredients, setIngredients] = useState<Ingredient[]>([]);
-  const [selectedProductId, setSelectedProductId] = useState<number | null>(null);
+  const [selectedProductId, setSelectedProductId] = useState<string | null>(null);
 
   const [rows, setRows] = useState<CompositionItem[]>([]);
   const [compositionSummary, setCompositionSummary] = useState<CompositionResponse | null>(null);
@@ -104,7 +104,7 @@ export default function Recipes() {
     }
   }
 
-  async function loadComposition(productId: number) {
+  async function loadComposition(productId: string) {
     try {
       const { data } = await api.get<CompositionResponse>(`/products/${productId}/composition`);
       setCompositionSummary(data);
@@ -419,13 +419,13 @@ export default function Recipes() {
                         rows.map((row, index) => {
                           const ing = ingredients.find((i) => i.id === row.ingredient_id);
                           return (
-                            <TableRow key={`${row.ingredient_id}-${index}`}>
+                            <TableRow key={index}>
                               <TableCell>
                                 <select
                                   className="h-9 w-full rounded-md border bg-background px-2 text-sm"
                                   value={row.ingredient_id}
                                   onChange={(e) =>
-                                    updateRow(index, { ingredient_id: Number(e.target.value) })
+                                    updateRow(index, { ingredient_id: e.target.value })
                                   }
                                 >
                                   {ingredients.map((i) => (
