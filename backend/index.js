@@ -551,9 +551,12 @@ app.get('/clients', async (_req, res, next) => {
 
 app.get('/clients/:id/history', async (req, res, next) => {
   try {
-    const ordersSnap = await db.collection('orders').where('client_id', '==', req.params.id).orderBy('created_at', 'desc').get();
+    const ordersSnap = await db.collection('orders').where('client_id', '==', req.params.id).get();
     const orders = ordersSnap.docs.map(d => ({ id: d.id, ...d.data() }));
     
+    // Ordenação manual para evitar índice composto
+    orders.sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
+
     let total_spent = 0;
     let total_orders = 0;
     orders.forEach(o => {
@@ -960,7 +963,7 @@ app.get('/orders', async (_req, res, next) => {
 
 app.get('/kanban/orders', async (_req, res, next) => {
   try {
-    const snap = await db.collection('orders').where('status', 'in', ['todo', 'prep', 'ready']).orderBy('delivery_date').get();
+    const snap = await db.collection('orders').where('status', 'in', ['todo', 'prep', 'ready']).get();
     const orders = [];
     const allProductIds = new Set();
     const allClientIds = new Set();
@@ -990,6 +993,14 @@ app.get('/kanban/orders', async (_req, res, next) => {
       o.items.forEach(i => {
         i.product_name = productMap[i.product_id] || '?';
       });
+    });
+
+    // Ordenação manual para evitar necessidade de índice composto no Firestore
+    orders.sort((a, b) => {
+        const dateA = a.delivery_date || '9999-12-31';
+        const dateB = b.delivery_date || '9999-12-31';
+        if (dateA !== dateB) return dateA.localeCompare(dateB);
+        return (a.created_at || '').localeCompare(b.created_at || '');
     });
 
     res.json(orders);
@@ -1287,8 +1298,13 @@ app.get('/mei/das', async (req, res, next) => {
     try {
         const year = Number(req.query.year || new Date().getUTCFullYear());
         await ensureDasRows(year);
-        const snap = await db.collection('das_payments').where('year', '==', year).orderBy('month').get();
-        res.json(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+        const snap = await db.collection('das_payments').where('year', '==', year).get();
+        const docs = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+        
+        // Ordenação manual para evitar índice composto
+        docs.sort((a, b) => (a.month || 0) - (b.month || 0));
+        
+        res.json(docs);
     } catch (err) { next(err); }
 });
 
