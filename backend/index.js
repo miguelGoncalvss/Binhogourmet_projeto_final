@@ -188,25 +188,10 @@ function authRequired(req, res, next) {
 // ===============================
 // FIRESTORE HELPERS
 // ===============================
-async function seedDefaults() {
-  const metaRef = db.collection('_meta').doc('seeded');
+async function seedDefaults(userId) {
+  const metaRef = db.collection('_meta').doc(`seeded_${userId}`);
   const metaDoc = await metaRef.get();
   if (metaDoc.exists) return;
-
-  const usersRef = db.collection('users');
-  const userSnapshot = await usersRef.where('email', '==', 'binho@local').get();
-  
-  if (userSnapshot.empty) {
-    const password_hash = await bcrypt.hash('admin123', 10);
-    await usersRef.add({
-      name: 'Binho',
-      email: 'binho@local',
-      password_hash,
-      must_change_password: 1,
-      created_at: nowIso(),
-      updated_at: nowIso()
-    });
-  }
 
   const accountsRef = db.collection('accounts');
   const defaultAccounts = [
@@ -216,10 +201,11 @@ async function seedDefaults() {
   ];
 
   for (const acc of defaultAccounts) {
-    const snap = await accountsRef.where('name', '==', acc.name).get();
+    const snap = await accountsRef.where('owner_id', '==', userId).where('name', '==', acc.name).get();
     if (snap.empty) {
       await accountsRef.add({
         ...acc,
+        owner_id: userId,
         opening_balance: 0,
         is_active: 1,
         created_at: nowIso(),
@@ -241,12 +227,13 @@ async function seedDefaults() {
   ];
 
   for (const [name, type, is_personal] of defaultCategories) {
-    const snap = await categoriesRef.where('name', '==', name).get();
+    const snap = await categoriesRef.where('owner_id', '==', userId).where('name', '==', name).get();
     if (snap.empty) {
       await categoriesRef.add({
         name,
         type,
         is_personal,
+        owner_id: userId,
         created_at: nowIso(),
         updated_at: nowIso()
       });
@@ -256,16 +243,17 @@ async function seedDefaults() {
   await metaRef.set({ at: nowIso() });
 }
 
-async function ensureDasRows(year) {
+async function ensureDasRows(year, userId) {
   const y = Number(year);
   const dasRef = db.collection('das_payments');
   for (let month = 1; month <= 12; month++) {
-    const snap = await dasRef.where('year', '==', y).where('month', '==', month).get();
+    const snap = await dasRef.where('owner_id', '==', userId).where('year', '==', y).where('month', '==', month).get();
     if (snap.empty) {
       const dueDate = new Date(Date.UTC(y, month, 20, 12, 0, 0)).toISOString();
       await dasRef.add({
         year: y,
         month,
+        owner_id: userId,
         status: 'pending',
         due_date: dueDate,
         amount: null,
@@ -276,8 +264,8 @@ async function ensureDasRows(year) {
   }
 }
 
-async function getCategoryByName(name) {
-  const snap = await db.collection('categories').where('name', '==', name).limit(1).get();
+async function getCategoryByName(name, userId) {
+  const snap = await db.collection('categories').where('owner_id', '==', userId).where('name', '==', name).limit(1).get();
   if (snap.empty) return null;
   return { id: snap.docs[0].id, ...snap.docs[0].data() };
 }
@@ -415,12 +403,12 @@ app.use(authRequired);
 // ===============================
 // ACCOUNTS
 // ===============================
-app.get('/accounts', async (_req, res, next) => {
+app.get('/accounts', async (req, res, next) => {
   try {
-    const snap = await db.collection('accounts').orderBy('is_active', 'desc').get();
+    const snap = await db.collection('accounts').where('owner_id', '==', req.user.id).orderBy('is_active', 'desc').get();
     const accounts = snap.docs.map(doc => ({ id: doc.id, ...doc.data(), current_balance: toNumber(doc.data().opening_balance, 0) }));
 
-    const txSnap = await db.collection('transactions').get();
+    const txSnap = await db.collection('transactions').where('owner_id', '==', req.user.id).get();
     const balanceMap = {};
     txSnap.forEach(t => {
       const tdata = t.data();
@@ -444,10 +432,11 @@ app.post('/accounts', async (req, res, next) => {
     const { name, type, opening_balance, is_active } = req.body || {};
     if (!String(name || '').trim()) return res.status(400).json({ error: 'Nome da conta é obrigatório.' });
 
-    const snap = await db.collection('accounts').where('name', '==', String(name).trim()).get();
+    const snap = await db.collection('accounts').where('owner_id', '==', req.user.id).where('name', '==', String(name).trim()).get();
     if (!snap.empty) return res.status(400).json({ error: 'Já existe uma conta com esse nome.' });
 
     const docRef = await db.collection('accounts').add({
+      owner_id: req.user.id,
       name: String(name).trim(),
       type: String(type || 'Conta Corrente'),
       opening_balance: toNumber(opening_balance, 0),
@@ -464,7 +453,11 @@ app.post('/accounts', async (req, res, next) => {
 app.put('/accounts/:id', async (req, res, next) => {
   try {
     const { name, type, opening_balance, is_active } = req.body || {};
-    await db.collection('accounts').doc(req.params.id).update({
+    const docRef = db.collection('accounts').doc(req.params.id);
+    const doc = await docRef.get();
+    if (!doc.exists || doc.data().owner_id !== req.user.id) return res.status(404).json({ error: 'Não encontrado.' });
+
+    await docRef.update({
       name: String(name || '').trim(),
       type: String(type || 'Conta Corrente'),
       opening_balance: toNumber(opening_balance, 0),
@@ -477,12 +470,16 @@ app.put('/accounts/:id', async (req, res, next) => {
 
 app.delete('/accounts/:id', async (req, res, next) => {
   try {
-    const txSnap = await db.collection('transactions').where('account_id', '==', req.params.id).limit(1).get();
-    const orderSnap = await db.collection('orders').where('account_id', '==', req.params.id).limit(1).get();
+    const docRef = db.collection('accounts').doc(req.params.id);
+    const doc = await docRef.get();
+    if (!doc.exists || doc.data().owner_id !== req.user.id) return res.status(404).json({ error: 'Não encontrado.' });
+
+    const txSnap = await db.collection('transactions').where('owner_id', '==', req.user.id).where('account_id', '==', req.params.id).limit(1).get();
+    const orderSnap = await db.collection('orders').where('owner_id', '==', req.user.id).where('account_id', '==', req.params.id).limit(1).get();
     if (!txSnap.empty || !orderSnap.empty) {
       return res.status(400).json({ error: 'Conta possui registros vinculados e não pode ser excluída.' });
     }
-    await db.collection('accounts').doc(req.params.id).delete();
+    await docRef.delete();
     res.json({ ok: true });
   } catch (err) { next(err); }
 });
@@ -490,9 +487,9 @@ app.delete('/accounts/:id', async (req, res, next) => {
 // ===============================
 // CATEGORIES
 // ===============================
-app.get('/categories', async (_req, res, next) => {
+app.get('/categories', async (req, res, next) => {
   try {
-    const snap = await db.collection('categories').orderBy('name').get();
+    const snap = await db.collection('categories').where('owner_id', '==', req.user.id).orderBy('name').get();
     res.json(snap.docs.map(d => ({ id: d.id, ...d.data() })));
   } catch (err) { next(err); }
 });
@@ -502,10 +499,11 @@ app.post('/categories', async (req, res, next) => {
     const { name, type, is_personal } = req.body || {};
     if (!String(name || '').trim()) return res.status(400).json({ error: 'Nome é obrigatório.' });
 
-    const snap = await db.collection('categories').where('name', '==', String(name).trim()).get();
+    const snap = await db.collection('categories').where('owner_id', '==', req.user.id).where('name', '==', String(name).trim()).get();
     if (!snap.empty) return res.status(400).json({ error: 'Categoria já existe.' });
 
     const docRef = await db.collection('categories').add({
+      owner_id: req.user.id,
       name: String(name).trim(),
       type: ['income', 'expense', 'both'].includes(String(type)) ? String(type) : 'both',
       is_personal: Number(is_personal || 0) ? 1 : 0,
@@ -520,7 +518,11 @@ app.post('/categories', async (req, res, next) => {
 app.put('/categories/:id', async (req, res, next) => {
   try {
     const { name, type, is_personal } = req.body || {};
-    await db.collection('categories').doc(req.params.id).update({
+    const docRef = db.collection('categories').doc(req.params.id);
+    const doc = await docRef.get();
+    if (!doc.exists || doc.data().owner_id !== req.user.id) return res.status(404).json({ error: 'Não encontrado.' });
+
+    await docRef.update({
       name: String(name).trim(),
       type: ['income', 'expense', 'both'].includes(String(type)) ? String(type) : 'both',
       is_personal: Number(is_personal || 0) ? 1 : 0,
@@ -532,9 +534,13 @@ app.put('/categories/:id', async (req, res, next) => {
 
 app.delete('/categories/:id', async (req, res, next) => {
   try {
-    const snap = await db.collection('transactions').where('category_id', '==', req.params.id).limit(1).get();
+    const docRef = db.collection('categories').doc(req.params.id);
+    const doc = await docRef.get();
+    if (!doc.exists || doc.data().owner_id !== req.user.id) return res.status(404).json({ error: 'Não encontrado.' });
+
+    const snap = await db.collection('transactions').where('owner_id', '==', req.user.id).where('category_id', '==', req.params.id).limit(1).get();
     if (!snap.empty) return res.status(400).json({ error: 'Categoria possui transações e não pode ser excluída.' });
-    await db.collection('categories').doc(req.params.id).delete();
+    await docRef.delete();
     res.json({ ok: true });
   } catch (err) { next(err); }
 });
@@ -542,16 +548,19 @@ app.delete('/categories/:id', async (req, res, next) => {
 // ===============================
 // CLIENTS
 // ===============================
-app.get('/clients', async (_req, res, next) => {
+app.get('/clients', async (req, res, next) => {
   try {
-    const snap = await db.collection('clients').orderBy('name').get();
+    const snap = await db.collection('clients').where('owner_id', '==', req.user.id).orderBy('name').get();
     res.json(snap.docs.map(d => ({ id: d.id, ...d.data() })));
   } catch (err) { next(err); }
 });
 
 app.get('/clients/:id/history', async (req, res, next) => {
   try {
-    const ordersSnap = await db.collection('orders').where('client_id', '==', req.params.id).get();
+    const clientDoc = await db.collection('clients').doc(req.params.id).get();
+    if (!clientDoc.exists || clientDoc.data().owner_id !== req.user.id) return res.status(404).json({ error: 'Cliente não encontrado.' });
+
+    const ordersSnap = await db.collection('orders').where('owner_id', '==', req.user.id).where('client_id', '==', req.params.id).get();
     const orders = ordersSnap.docs.map(d => ({ id: d.id, ...d.data() }));
     
     // Ordenação manual para evitar índice composto
@@ -576,6 +585,7 @@ app.post('/clients', async (req, res, next) => {
     if (!String(name || '').trim()) return res.status(400).json({ error: 'Nome do cliente é obrigatório.' });
 
     const docRef = await db.collection('clients').add({
+      owner_id: req.user.id,
       name: String(name).trim(),
       phone: phone ? String(phone).trim() : null,
       email: email ? String(email).trim() : null,
@@ -591,7 +601,11 @@ app.post('/clients', async (req, res, next) => {
 app.put('/clients/:id', async (req, res, next) => {
   try {
     const { name, phone, email, notes } = req.body || {};
-    await db.collection('clients').doc(req.params.id).update({
+    const docRef = db.collection('clients').doc(req.params.id);
+    const doc = await docRef.get();
+    if (!doc.exists || doc.data().owner_id !== req.user.id) return res.status(404).json({ error: 'Não encontrado.' });
+
+    await docRef.update({
       name: String(name || '').trim(),
       phone: phone ? String(phone).trim() : null,
       email: email ? String(email).trim() : null,
@@ -604,11 +618,15 @@ app.put('/clients/:id', async (req, res, next) => {
 
 app.delete('/clients/:id', async (req, res, next) => {
   try {
-    const ordersSnap = await db.collection('orders').where('client_id', '==', req.params.id).get();
+    const docRef = db.collection('clients').doc(req.params.id);
+    const doc = await docRef.get();
+    if (!doc.exists || doc.data().owner_id !== req.user.id) return res.status(404).json({ error: 'Não encontrado.' });
+
+    const ordersSnap = await db.collection('orders').where('owner_id', '==', req.user.id).where('client_id', '==', req.params.id).get();
     const batch = db.batch();
     ordersSnap.forEach(doc => batch.update(doc.ref, { client_id: null }));
     await batch.commit();
-    await db.collection('clients').doc(req.params.id).delete();
+    await docRef.delete();
     res.json({ ok: true });
   } catch (err) { next(err); }
 });
@@ -626,9 +644,9 @@ app.post('/ingredients/extract-receipt', upload.single('receipt'), async (req, r
   } catch (err) { next(err); }
 });
 
-app.get('/ingredients', async (_req, res, next) => {
+app.get('/ingredients', async (req, res, next) => {
   try {
-    const snap = await db.collection('ingredients').orderBy('name').get();
+    const snap = await db.collection('ingredients').where('owner_id', '==', req.user.id).orderBy('name').get();
     res.json(snap.docs.map(d => ({ id: d.id, ...d.data() })));
   } catch (err) { next(err); }
 });
@@ -639,7 +657,7 @@ app.post('/ingredients', async (req, res, next) => {
     const name = String(body.name || '').trim();
     if (!name) return res.status(400).json({ error: 'Nome do insumo é obrigatório.' });
 
-    const snap = await db.collection('ingredients').where('name', '==', name).get();
+    const snap = await db.collection('ingredients').where('owner_id', '==', req.user.id).where('name', '==', name).get();
     if (!snap.empty) return res.status(400).json({ error: 'Já existe um insumo com esse nome.' });
 
     let unit, measurement_type, base_unit, stock_qty, min_stock_qty, cost_per_unit;
@@ -663,6 +681,7 @@ app.post('/ingredients', async (req, res, next) => {
     }
 
     const docRef = await db.collection('ingredients').add({
+      owner_id: req.user.id,
       name, unit, stock_qty, min_stock_qty, cost_per_unit,
       notes: body.notes ? String(body.notes) : null,
       measurement_type, base_unit, stock_qty_base: stock_qty, min_stock_qty_base: min_stock_qty, last_cost_per_base_unit: cost_per_unit,
@@ -678,7 +697,7 @@ app.put('/ingredients/:id', async (req, res, next) => {
     const body = req.body || {};
     const docRef = db.collection('ingredients').doc(req.params.id);
     const doc = await docRef.get();
-    if (!doc.exists) return res.status(404).json({ error: 'Insumo não encontrado.' });
+    if (!doc.exists || doc.data().owner_id !== req.user.id) return res.status(404).json({ error: 'Não encontrado.' });
     const current = doc.data();
 
     const name = String(body.name ?? current.name).trim();
@@ -713,12 +732,16 @@ app.put('/ingredients/:id', async (req, res, next) => {
 
 app.delete('/ingredients/:id', async (req, res, next) => {
   try {
-    const productsSnap = await db.collection('products').get();
+    const docRef = db.collection('ingredients').doc(req.params.id);
+    const doc = await docRef.get();
+    if (!doc.exists || doc.data().owner_id !== req.user.id) return res.status(404).json({ error: 'Não encontrado.' });
+
+    const productsSnap = await db.collection('products').where('owner_id', '==', req.user.id).get();
     for (const p of productsSnap.docs) {
       const compSnap = await p.ref.collection('composition').where('ingredient_id', '==', req.params.id).limit(1).get();
       if (!compSnap.empty) return res.status(400).json({ error: 'Insumo está vinculado a fichas técnicas.' });
     }
-    await db.collection('ingredients').doc(req.params.id).delete();
+    await docRef.delete();
     res.json({ ok: true });
   } catch (err) { next(err); }
 });
@@ -733,7 +756,7 @@ app.post('/ingredients/purchase', async (req, res, next) => {
         const { ingredient_id, quantity, purchase_unit, total_cost, note } = item;
         const ingRef = db.collection('ingredients').doc(ingredient_id);
         const doc = await transaction.get(ingRef);
-        if (!doc.exists) throw new Error(`Insumo não encontrado: ${ingredient_id}`);
+        if (!doc.exists || doc.data().owner_id !== req.user.id) throw new Error(`Insumo não encontrado ou sem permissão: ${ingredient_id}`);
         const ing = doc.data();
 
         const qtyBase = convertToSpecificBase(quantity, purchase_unit, ing.base_unit || ing.unit);
@@ -747,6 +770,7 @@ app.post('/ingredients/purchase', async (req, res, next) => {
         });
 
         transaction.set(db.collection('stock_movements').doc(), {
+          owner_id: req.user.id,
           ingredient_id, movement_type: 'purchase', quantity_base: qtyBase,
           unit_base: ing.base_unit || ing.unit, unit_cost_base: unitCost,
           total_cost: toNumber(total_cost), note: note || `Compra: ${quantity} ${purchase_unit}`,
@@ -761,9 +785,9 @@ app.post('/ingredients/purchase', async (req, res, next) => {
 // ===============================
 // PRODUCTS
 // ===============================
-app.get('/products', async (_req, res, next) => {
+app.get('/products', async (req, res, next) => {
   try {
-    const snap = await db.collection('products').orderBy('name').get();
+    const snap = await db.collection('products').where('owner_id', '==', req.user.id).orderBy('name').get();
     res.json(snap.docs.map(d => ({ id: d.id, ...d.data() })));
   } catch (err) { next(err); }
 });
@@ -773,10 +797,11 @@ app.post('/products', async (req, res, next) => {
     const { name, sale_price, unit_label, is_active, notes } = req.body || {};
     if (!String(name || '').trim()) return res.status(400).json({ error: 'Nome é obrigatório.' });
 
-    const snap = await db.collection('products').where('name', '==', String(name).trim()).get();
+    const snap = await db.collection('products').where('owner_id', '==', req.user.id).where('name', '==', String(name).trim()).get();
     if (!snap.empty) return res.status(400).json({ error: 'Já existe um produto com esse nome.' });
 
     const docRef = await db.collection('products').add({
+      owner_id: req.user.id,
       name: String(name).trim(),
       sale_price: toNumber(sale_price),
       unit_label: String(unit_label || 'un'),
@@ -792,7 +817,11 @@ app.post('/products', async (req, res, next) => {
 app.put('/products/:id', async (req, res, next) => {
   try {
     const { name, sale_price, unit_label, is_active, notes } = req.body || {};
-    await db.collection('products').doc(req.params.id).update({
+    const docRef = db.collection('products').doc(req.params.id);
+    const doc = await docRef.get();
+    if (!doc.exists || doc.data().owner_id !== req.user.id) return res.status(404).json({ error: 'Não encontrado.' });
+
+    await docRef.update({
       name: String(name || '').trim(),
       sale_price: toNumber(sale_price),
       unit_label: String(unit_label || 'un'),
@@ -806,21 +835,34 @@ app.put('/products/:id', async (req, res, next) => {
 
 app.delete('/products/:id', async (req, res, next) => {
   try {
+    const docRef = db.collection('products').doc(req.params.id);
+    const doc = await docRef.get();
+    if (!doc.exists || doc.data().owner_id !== req.user.id) return res.status(404).json({ error: 'Não encontrado.' });
+
     const snap = await db.collectionGroup('order_items').where('product_id', '==', req.params.id).limit(1).get();
-    if (!snap.empty) return res.status(400).json({ error: 'Produto possui pedidos e não pode ser excluído.' });
+    // Nota: Filtro de owner_id em collectionGroup pode exigir índice. Para segurança, verificamos o owner_id do documento retornado.
+    if (!snap.empty) {
+        for (const itemDoc of snap.docs) {
+            // Se o item pertence a um pedido deste usuário, impede exclusão
+            const orderDoc = await itemDoc.ref.parent.parent.get();
+            if (orderDoc.exists && orderDoc.data().owner_id === req.user.id) {
+                return res.status(400).json({ error: 'Produto possui pedidos e não pode ser excluído.' });
+            }
+        }
+    }
     
     // Deleta composição
-    const compSnap = await db.collection('products').doc(req.params.id).collection('composition').get();
+    const compSnap = await docRef.collection('composition').get();
     const batch = db.batch();
     compSnap.forEach(d => batch.delete(d.ref));
-    batch.delete(db.collection('products').doc(req.params.id));
+    batch.delete(docRef);
     await batch.commit();
     res.json({ ok: true });
   } catch (err) { next(err); }
 });
 
 app.get('/products/:id/composition', async (req, res, next) => {
-  try { res.json(await getProductCostSummary(req.params.id)); } catch (err) { next(err); }
+  try { res.json(await getProductCostSummary(req.params.id, req.user.id)); } catch (err) { next(err); }
 });
 
 app.put('/products/:id/composition', async (req, res, next) => {
@@ -828,7 +870,7 @@ app.put('/products/:id/composition', async (req, res, next) => {
     const { items } = req.body || [];
     const productRef = db.collection('products').doc(req.params.id);
     const snap = await productRef.get();
-    if (!snap.exists) return res.status(404).json({ error: 'Produto não encontrado.' });
+    if (!snap.exists || snap.data().owner_id !== req.user.id) return res.status(404).json({ error: 'Produto não encontrado.' });
 
     const compRef = productRef.collection('composition');
     const existing = await compRef.get();
@@ -845,7 +887,7 @@ app.put('/products/:id/composition', async (req, res, next) => {
       });
     }
     await batch.commit();
-    res.json(await getProductCostSummary(req.params.id));
+    res.json(await getProductCostSummary(req.params.id, req.user.id));
   } catch (err) { next(err); }
 });
 
@@ -854,7 +896,7 @@ app.put('/products/:id/composition', async (req, res, next) => {
 // ===============================
 app.get('/transactions', async (req, res, next) => {
   try {
-    let query = db.collection('transactions').orderBy('occurred_at', 'desc');
+    let query = db.collection('transactions').where('owner_id', '==', req.user.id).orderBy('occurred_at', 'desc');
     const { from, to } = req.query;
     if (from) query = query.where('occurred_at', '>=', new Date(from).toISOString());
     if (to) query = query.where('occurred_at', '<=', new Date(to).toISOString());
@@ -895,6 +937,7 @@ app.post('/transactions', async (req, res, next) => {
     }
 
     const docRef = await db.collection('transactions').add({
+      owner_id: req.user.id,
       type: data.type,
       amount: toNumber(data.amount),
       description: data.description || null,
@@ -915,7 +958,7 @@ app.post('/transactions', async (req, res, next) => {
 app.delete('/transactions/:id', async (req, res, next) => {
   try {
     const doc = await db.collection('transactions').doc(req.params.id).get();
-    if (!doc.exists) return res.status(404).json({ error: 'Não encontrado.' });
+    if (!doc.exists || doc.data().owner_id !== req.user.id) return res.status(404).json({ error: 'Não encontrado.' });
     if (doc.data().source === 'order_auto') return res.status(400).json({ error: 'Exclua o pedido para remover esta transação.' });
     await doc.ref.delete();
     res.json({ ok: true });
@@ -928,7 +971,7 @@ app.get('/finance/dre', async (req, res, next) => {
     const month = Number(req.query.month || new Date().getUTCMonth() + 1);
     const { startIso, endIso } = monthRangeUtc(year, month);
 
-    const txSnap = await db.collection('transactions').where('occurred_at', '>=', startIso).where('occurred_at', '<', endIso).get();
+    const txSnap = await db.collection('transactions').where('owner_id', '==', req.user.id).where('occurred_at', '>=', startIso).where('occurred_at', '<', endIso).get();
     let revenue = 0, operational_expenses = 0, personal_withdrawals = 0;
     txSnap.forEach(d => {
       const data = d.data();
@@ -954,16 +997,16 @@ app.get('/finance/dre', async (req, res, next) => {
 // ===============================
 // ORDERS
 // ===============================
-app.get('/orders', async (_req, res, next) => {
+app.get('/orders', async (req, res, next) => {
   try {
-    const snap = await db.collection('orders').orderBy('created_at', 'desc').limit(50).get();
+    const snap = await db.collection('orders').where('owner_id', '==', req.user.id).orderBy('created_at', 'desc').limit(50).get();
     res.json(snap.docs.map(d => ({ id: d.id, ...d.data() })));
   } catch (err) { next(err); }
 });
 
-app.get('/kanban/orders', async (_req, res, next) => {
+app.get('/kanban/orders', async (req, res, next) => {
   try {
-    const snap = await db.collection('orders').where('status', 'in', ['todo', 'prep', 'ready']).get();
+    const snap = await db.collection('orders').where('owner_id', '==', req.user.id).where('status', 'in', ['todo', 'prep', 'ready']).get();
     const orders = [];
     const allProductIds = new Set();
     const allClientIds = new Set();
@@ -1016,7 +1059,7 @@ app.post('/orders', async (req, res, next) => {
     let totalAmount = 0, totalCost = 0;
     const normalizedItems = [];
     for (const item of items) {
-      const summary = await getProductCostSummary(item.product_id);
+      const summary = await getProductCostSummary(item.product_id, req.user.id);
       const lineTotal = item.quantity * item.unit_price;
       const lineCost = item.quantity * summary.calculated_cost;
       totalAmount += lineTotal;
@@ -1025,6 +1068,7 @@ app.post('/orders', async (req, res, next) => {
     }
 
     const orderRef = await db.collection('orders').add({
+      owner_id: req.user.id,
       customer_name: body.customer_name || null,
       client_id: body.client_id || null,
       channel: body.channel || 'balcao',
@@ -1053,7 +1097,7 @@ app.put('/orders/:id/status', async (req, res, next) => {
     const { status } = req.body;
     const orderRef = db.collection('orders').doc(req.params.id);
     const orderDoc = await orderRef.get();
-    if (!orderDoc.exists) return res.status(404).json({ error: 'Não encontrado.' });
+    if (!orderDoc.exists || orderDoc.data().owner_id !== req.user.id) return res.status(404).json({ error: 'Não encontrado.' });
     const order = orderDoc.data();
 
     if (status === 'delivered' && order.status !== 'delivered') {
@@ -1072,9 +1116,7 @@ app.put('/orders/:id/status', async (req, res, next) => {
 
         for (const itemDoc of itemsSnap.docs) {
           const item = itemDoc.data();
-          const summary = await getProductCostSummary(item.product_id); // Nota: getProductCostSummary faz buscas internas fora da transaction. 
-          // Re-implementando lógica de custo para usar transaction se possível, mas o prompt diz "reutilizar documentos de produtos já lidos".
-          // getProductCostSummary busca composição e ingredientes. 
+          const summary = await getProductCostSummary(item.product_id, req.user.id);
           
           snapshot_items.push({
             product_id: item.product_id,
@@ -1101,6 +1143,7 @@ app.put('/orders/:id/status', async (req, res, next) => {
             const newStock = toNumber(ing.stock_qty_base ?? ing.stock_qty) - need;
             transaction.update(ingRef, { stock_qty: newStock, stock_qty_base: newStock, updated_at: nowIso() });
             transaction.set(db.collection('stock_movements').doc(), {
+              owner_id: req.user.id,
               ingredient_id: ingId, movement_type: 'sale_consumption', quantity_base: -need,
               unit_base: ing.base_unit || ing.unit, unit_cost_base: toNumber(ing.cost_per_unit),
               total_cost: need * toNumber(ing.cost_per_unit), note: `Consumo #${orderDoc.id}`,
@@ -1109,8 +1152,9 @@ app.put('/orders/:id/status', async (req, res, next) => {
           }
         }
 
-        const salesCat = await getCategoryByName('Vendas');
+        const salesCat = await getCategoryByName('Vendas', req.user.id);
         transaction.set(db.collection('transactions').doc(), {
+          owner_id: req.user.id,
           type: 'income', amount: order.total_amount, description: `Venda #${orderDoc.id}`,
           account_id: order.account_id, category_id: salesCat?.id || null,
           occurred_at: nowIso(), is_personal_withdrawal: 0, affects_mei_revenue: 1,
@@ -1136,7 +1180,7 @@ app.get('/dashboard/summary', async (req, res, next) => {
     const month = Number(req.query.month || new Date().getUTCMonth() + 1);
     const { startIso, endIso } = monthRangeUtc(year, month);
 
-    const txSnap = await db.collection('transactions').where('occurred_at', '>=', startIso).where('occurred_at', '<', endIso).get();
+    const txSnap = await db.collection('transactions').where('owner_id', '==', req.user.id).where('occurred_at', '>=', startIso).where('occurred_at', '<', endIso).get();
     let revenue = 0, expenses = 0, personal_withdrawals = 0;
     txSnap.forEach(d => {
       const data = d.data();
@@ -1147,10 +1191,10 @@ app.get('/dashboard/summary', async (req, res, next) => {
       }
     });
 
-    const activeOrdersSnap = await db.collection('orders').where('status', 'in', ['todo', 'prep', 'ready']).get();
+    const activeOrdersSnap = await db.collection('orders').where('owner_id', '==', req.user.id).where('status', 'in', ['todo', 'prep', 'ready']).get();
     const active_orders = activeOrdersSnap.docs.map(d => ({ id: d.id, ...d.data() }));
 
-    const ingSnap = await db.collection('ingredients').get();
+    const ingSnap = await db.collection('ingredients').where('owner_id', '==', req.user.id).get();
     const critical_ingredients = ingSnap.docs
       .map(d => ({ id: d.id, ...d.data() }))
       .filter(i => toNumber(i.stock_qty) <= toNumber(i.min_stock_qty))
@@ -1160,6 +1204,7 @@ app.get('/dashboard/summary', async (req, res, next) => {
 
     // Top Products & Clients (Based on delivered orders in the month using snapshot)
     const deliveredOrdersSnap = await db.collection('orders')
+      .where('owner_id', '==', req.user.id)
       .where('status', '==', 'delivered')
       .where('delivered_at', '>=', startIso)
       .where('delivered_at', '<', endIso)
@@ -1225,6 +1270,7 @@ app.get('/dashboard/summary', async (req, res, next) => {
       const range = monthRangeUtc(ty, tm);
       
       const tSnap = await db.collection('transactions')
+        .where('owner_id', '==', req.user.id)
         .where('occurred_at', '>=', range.startIso)
         .where('occurred_at', '<', range.endIso)
         .get();
@@ -1255,9 +1301,9 @@ app.get('/dashboard/summary', async (req, res, next) => {
 app.get('/mei/status', async (req, res, next) => {
   try {
     const year = Number(req.query.year || new Date().getUTCFullYear());
-    await ensureDasRows(year);
+    await ensureDasRows(year, req.user.id);
     const { startIso, endIso } = yearRangeUtc(year);
-    const txSnap = await db.collection('transactions').where('occurred_at', '>=', startIso).where('occurred_at', '<', endIso).get();
+    const txSnap = await db.collection('transactions').where('owner_id', '==', req.user.id).where('occurred_at', '>=', startIso).where('occurred_at', '<', endIso).get();
     
     let business_revenue = 0, business_expenses = 0, personal_withdrawals = 0;
     txSnap.forEach(d => {
@@ -1269,7 +1315,7 @@ app.get('/mei/status', async (req, res, next) => {
       }
     });
 
-    const dasSnap = await db.collection('das_payments').where('year', '==', year).get();
+    const dasSnap = await db.collection('das_payments').where('owner_id', '==', req.user.id).where('year', '==', year).get();
     const das_stats = { paid: 0, pending: 0, overdue: 0 };
     dasSnap.forEach(d => {
       const s = d.data().status;
@@ -1297,8 +1343,8 @@ app.get('/mei/status', async (req, res, next) => {
 app.get('/mei/das', async (req, res, next) => {
     try {
         const year = Number(req.query.year || new Date().getUTCFullYear());
-        await ensureDasRows(year);
-        const snap = await db.collection('das_payments').where('year', '==', year).get();
+        await ensureDasRows(year, req.user.id);
+        const snap = await db.collection('das_payments').where('owner_id', '==', req.user.id).where('year', '==', year).get();
         const docs = snap.docs.map(d => ({ id: d.id, ...d.data() }));
         
         // Ordenação manual para evitar índice composto
@@ -1311,8 +1357,12 @@ app.get('/mei/das', async (req, res, next) => {
 app.put('/mei/das/:id', async (req, res, next) => {
     try {
         const data = req.body || {};
+        const docRef = db.collection('das_payments').doc(req.params.id);
+        const doc = await docRef.get();
+        if (!doc.exists || doc.data().owner_id !== req.user.id) return res.status(404).json({ error: 'Não encontrado.' });
+
         const s = ['pending', 'paid', 'overdue'].includes(data.status) ? data.status : 'pending';
-        await db.collection('das_payments').doc(req.params.id).update({
+        await docRef.update({
             status: s,
             paid_at: s === 'paid' ? (data.paid_at ? new Date(data.paid_at).toISOString() : nowIso()) : null,
             amount: data.amount !== undefined ? toNumber(data.amount) : null,
@@ -1322,14 +1372,6 @@ app.put('/mei/das/:id', async (req, res, next) => {
         res.json({ ok: true });
     } catch (err) { next(err); }
 });
-
-// Inicialização automática
-(async () => {
-  try {
-    await seedDefaults();
-    await ensureDasRows(new Date().getUTCFullYear());
-  } catch (err) { console.error('Seed error:', err); }
-})();
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => console.log(`API rodando na porta ${PORT}`));
