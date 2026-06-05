@@ -1068,28 +1068,42 @@ app.post('/orders', async (req, res, next) => {
       normalizedItems.push({ ...item, line_total: lineTotal, unit_cost_snapshot: summary.calculated_cost, line_cost: lineCost });
     }
 
-    const orderRef = await db.collection('orders').add({
-      owner_id: req.user.id,
-      customer_name: body.customer_name || null,
-      client_id: body.client_id || null,
-      channel: body.channel || 'balcao',
-      order_type: body.order_type || 'balcao',
-      status: 'todo',
-      account_id: body.account_id || null,
-      total_amount: totalAmount,
-      total_cost: totalCost,
-      notes: body.notes || null,
-      delivery_date: body.delivery_date ? new Date(body.delivery_date).toISOString() : null,
-      created_at: nowIso(), updated_at: nowIso()
+    const result = await db.runTransaction(async (transaction) => {
+      const counterRef = db.collection('counters').doc(`orders_${req.user.id}`);
+      const counterDoc = await transaction.get(counterRef);
+      const nextNumber = (counterDoc.exists ? counterDoc.data().last_number || 0 : 0) + 1;
+      const displayId = `PED-${String(nextNumber).padStart(6, '0')}`;
+
+      const orderRef = db.collection('orders').doc();
+      
+      transaction.set(counterRef, { last_number: nextNumber, updated_at: nowIso() }, { merge: true });
+      
+      transaction.set(orderRef, {
+        owner_id: req.user.id,
+        order_number: nextNumber,
+        display_id: displayId,
+        customer_name: body.customer_name || null,
+        client_id: body.client_id || null,
+        channel: body.channel || 'balcao',
+        order_type: body.order_type || 'balcao',
+        status: 'todo',
+        account_id: body.account_id || null,
+        total_amount: totalAmount,
+        total_cost: totalCost,
+        notes: body.notes || null,
+        delivery_date: body.delivery_date ? new Date(body.delivery_date).toISOString() : null,
+        created_at: nowIso(), updated_at: nowIso()
+      });
+
+      for (const item of normalizedItems) {
+        const itemRef = orderRef.collection('items').doc();
+        transaction.set(itemRef, { ...item, created_at: nowIso() });
+      }
+
+      return { id: orderRef.id, display_id: displayId };
     });
 
-    const batch = db.batch();
-    for (const item of normalizedItems) {
-      const itemRef = orderRef.collection('items').doc();
-      batch.set(itemRef, { ...item, created_at: nowIso() });
-    }
-    await batch.commit();
-    res.status(201).json({ ok: true, order: { id: orderRef.id } });
+    res.status(201).json({ ok: true, order: result });
   } catch (err) { next(err); }
 });
 

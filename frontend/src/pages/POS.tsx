@@ -9,7 +9,7 @@ import { Minus, Plus, ShoppingCart, Trash2 } from "lucide-react";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
 
 type Product = {
-  id: number;
+  id: string;
   name: string;
   sale_price: number;
   unit_label: string;
@@ -17,19 +17,21 @@ type Product = {
 };
 
 type Account = {
-  id: number;
+  id: string;
   name: string;
 };
 
 type CartItem = {
-  product_id: number;
+  product_id: string;
   product_name: string;
   quantity: number;
   unit_price: number;
 };
 
 type OrderListItem = {
-  id: number;
+  id: string;
+  display_id?: string;
+  order_number?: number;
   customer_name?: string | null;
   status: string;
   channel: string;
@@ -99,13 +101,13 @@ export default function POS() {
     });
   }
 
-  function updateCartItem(productId: number, patch: Partial<CartItem>) {
+  function updateCartItem(productId: string, patch: Partial<CartItem>) {
     setCart((prev) =>
       prev.map((c) => (c.product_id === productId ? { ...c, ...patch } : c))
     );
   }
 
-  function removeCartItem(productId: number) {
+  function removeCartItem(productId: string) {
     setCart((prev) => prev.filter((c) => c.product_id !== productId));
   }
 
@@ -140,7 +142,8 @@ export default function POS() {
 
       const { data } = await api.post("/orders", payload);
 
-      alert(`Pedido #${data.order.id} criado com sucesso! Ele foi enviado para a Cozinha.`);
+      const orderLabel = data.order.display_id || data.order.id;
+      alert(`Pedido #${orderLabel} criado com sucesso! Ele foi enviado para a Cozinha.`);
       setCart([]);
       setCustomerName("");
       setClientId("");
@@ -372,7 +375,7 @@ export default function POS() {
               <TableBody>
                 {recentOrders.map((order) => (
                   <TableRow key={order.id}>
-                    <TableCell className="font-medium">#{order.id}</TableCell>
+                    <TableCell className="font-medium">#{order.display_id || order.id.substring(0, 6)}</TableCell>
                     <TableCell>{order.customer_name || "Balcão"}</TableCell>
                     <TableCell>{order.channel}</TableCell>
                     <TableCell>{order.status === "todo" || order.status === "prep" || order.status === "ready" ? "Na Cozinha" : "Entregue"}</TableCell>

@@ -11,7 +11,7 @@ import { formatCurrency, formatDateTime } from "../lib/formatters";
 
 
 type Client = {
-  id: number;
+  id: string;
   name: string;
   phone: string | null;
   email: string | null;
@@ -79,7 +79,7 @@ export default function Clients() {
     }
   }
 
-  async function handleDelete(id: number) {
+  async function handleDelete(id: string) {
     if (!window.confirm("Excluir cliente? Os pedidos dele continuarão no sistema.")) return;
     try {
       await api.delete(`/clients/${id}`);
@@ -204,7 +204,7 @@ export default function Clients() {
                 ) : 
                   clientOrders.map(o => (
                     <TableRow key={o.id}>
-                      <TableCell>#{o.id} - {o.channel}</TableCell>
+                      <TableCell>#{o.display_id || o.id.substring(0, 6)} - {o.channel}</TableCell>
                       <TableCell>{o.status === 'delivered' ? '✅ Entregue' : '⏳ Na fila'}</TableCell>
                       <TableCell className="font-medium">{formatCurrency(o.total_amount)}</TableCell>
                       <TableCell>{formatDateTime(o.created_at)}</TableCell>

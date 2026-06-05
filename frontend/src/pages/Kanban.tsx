@@ -9,7 +9,9 @@ import { ChevronRight, CheckCircle2, ChefHat, Receipt, Clock, GripVertical } fro
 type OrderItem = { product_name: string; quantity: number };
 
 type KanbanOrder = {
-  id: number;
+  id: string;
+  display_id?: string;
+  order_number?: number;
   customer_name: string | null;
   client_name: string | null;
   channel: string;
@@ -30,7 +32,7 @@ export default function Kanban() {
   const [loading, setLoading] = useState(true);
 
   // Estados para controlar o "Arrastar e Soltar" (Drag and Drop)
-  const [draggedOrderId, setDraggedOrderId] = useState<number | null>(null);
+  const [draggedOrderId, setDraggedOrderId] = useState<string | null>(null);
   const [dragOverCol, setDragOverCol] = useState<string | null>(null);
 
   async function loadKanban() {
@@ -49,7 +51,7 @@ export default function Kanban() {
   }, []);
 
   // Função do botão (Avançar / Entregar)
-  async function advanceStatus(orderId: number, currentStatus: string) {
+  async function advanceStatus(orderId: string, currentStatus: string) {
     const flow = { todo: "prep", prep: "ready", ready: "delivered" };
     const nextStatus = flow[currentStatus as keyof typeof flow];
     if (!nextStatus) return;
@@ -141,7 +143,7 @@ export default function Kanban() {
                           <div className="flex items-start gap-2">
                             <GripVertical className="h-4 w-4 text-muted-foreground/50 mt-0.5" />
                             <div>
-                              <p className="font-bold">#{order.id} - {order.client_name || order.customer_name || "Balcão"}</p>
+                              <p className="font-bold">#{order.display_id || order.id.substring(0, 6)} - {order.client_name || order.customer_name || "Balcão"}</p>
                               <Badge variant="outline" className="mt-1 text-xs">{order.channel}</Badge>
                             </div>
                           </div>
