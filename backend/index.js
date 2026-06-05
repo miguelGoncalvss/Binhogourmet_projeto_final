@@ -769,7 +769,8 @@ app.post('/ingredients/purchase', async (req, res, next) => {
           updated_at: nowIso()
         });
 
-        transaction.set(db.collection('stock_movements').doc(), {
+        const movementRef = db.collection('stock_movements').doc();
+        transaction.set(movementRef, {
           owner_id: req.user.id,
           ingredient_id, movement_type: 'purchase', quantity_base: qtyBase,
           unit_base: ing.base_unit || ing.unit, unit_cost_base: unitCost,
@@ -1102,57 +1103,86 @@ app.put('/orders/:id/status', async (req, res, next) => {
 
     if (status === 'delivered' && order.status !== 'delivered') {
       await db.runTransaction(async (transaction) => {
-        const itemsSnap = await orderRef.collection('items').get();
-        const ingredientNeeds = new Map();
-        const snapshot_items = [];
-        const productIds = [...new Set(itemsSnap.docs.map(d => d.data().product_id))];
+        // --- 1. LEITURAS (READS FIRST) ---
         
-        // Buscar produtos para snapshot_items e getProductCostSummary (via transaction)
+        // Itens do pedido
+        const itemsSnap = await orderRef.collection('items').get();
+        const items = itemsSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+        const productIds = [...new Set(items.map(i => i.product_id))];
+        
+        // Produtos
         const productDocsMap = {};
         for (const pid of productIds) {
           const pDoc = await transaction.get(db.collection('products').doc(pid));
           if (pDoc.exists) productDocsMap[pid] = pDoc.data();
         }
 
-        for (const itemDoc of itemsSnap.docs) {
-          const item = itemDoc.data();
-          const summary = await getProductCostSummary(item.product_id, req.user.id);
+        // Composições (técnicas) dos produtos e lista de ingredientes necessários
+        const productCompositions = {};
+        const ingredientsToFetch = new Set();
+        for (const pid of productIds) {
+          const compSnap = await db.collection('products').doc(pid).collection('composition').get();
+          const composition = compSnap.docs.map(d => d.data());
+          productCompositions[pid] = composition;
+          composition.forEach(c => ingredientsToFetch.add(c.ingredient_id));
+        }
+
+        // Ingredientes
+        const ingredientDocsMap = {};
+        for (const ingId of ingredientsToFetch) {
+          const ingDoc = await transaction.get(db.collection('ingredients').doc(ingId));
+          if (ingDoc.exists) ingredientDocsMap[ingId] = ingDoc.data();
+        }
+
+        // Categoria de Vendas
+        const salesCat = await getCategoryByName('Vendas', req.user.id);
+
+        // --- 2. PROCESSAMENTO ---
+        
+        const ingredientNeeds = new Map();
+        const snapshot_items = [];
+
+        for (const item of items) {
+          const pid = item.product_id;
+          const composition = productCompositions[pid] || [];
           
+          for (const comp of composition) {
+            const factor = 1 + toNumber(comp.waste_pct) / 100;
+            const required = item.quantity * toNumber(comp.quantity) * factor;
+            ingredientNeeds.set(comp.ingredient_id, (ingredientNeeds.get(comp.ingredient_id) || 0) + required);
+          }
+
           snapshot_items.push({
-            product_id: item.product_id,
-            product_name: productDocsMap[item.product_id]?.name || '?',
+            product_id: pid,
+            product_name: productDocsMap[pid]?.name || '?',
             quantity: item.quantity,
             unit_price: item.unit_price,
             line_total: item.line_total,
             unit_cost_snapshot: item.unit_cost_snapshot,
             line_cost: item.line_cost
           });
-
-          for (const comp of summary.composition) {
-            const factor = 1 + toNumber(comp.waste_pct) / 100;
-            const required = item.quantity * toNumber(comp.quantity) * factor;
-            ingredientNeeds.set(comp.ingredient_id, (ingredientNeeds.get(comp.ingredient_id) || 0) + required);
-          }
         }
 
+        // --- 3. ESCRITAS (WRITES LAST) ---
+
+        // Atualizar estoque e registrar movimentos
         for (const [ingId, need] of ingredientNeeds.entries()) {
-          const ingRef = db.collection('ingredients').doc(ingId);
-          const ingDoc = await transaction.get(ingRef);
-          if (ingDoc.exists) {
-            const ing = ingDoc.data();
+          const ing = ingredientDocsMap[ingId];
+          if (ing) {
             const newStock = toNumber(ing.stock_qty_base ?? ing.stock_qty) - need;
-            transaction.update(ingRef, { stock_qty: newStock, stock_qty_base: newStock, updated_at: nowIso() });
+            transaction.update(db.collection('ingredients').doc(ingId), { stock_qty: newStock, stock_qty_base: newStock, updated_at: nowIso() });
+            
             transaction.set(db.collection('stock_movements').doc(), {
               owner_id: req.user.id,
               ingredient_id: ingId, movement_type: 'sale_consumption', quantity_base: -need,
-              unit_base: ing.base_unit || ing.unit, unit_cost_base: toNumber(ing.cost_per_unit),
-              total_cost: need * toNumber(ing.cost_per_unit), note: `Consumo #${orderDoc.id}`,
+              unit_base: ing.base_unit || ing.unit, unit_cost_base: toNumber(ing.cost_per_unit || ing.last_cost_per_base_unit),
+              total_cost: need * toNumber(ing.cost_per_unit || ing.last_cost_per_base_unit), note: `Consumo #${orderDoc.id}`,
               created_at: nowIso()
             });
           }
         }
 
-        const salesCat = await getCategoryByName('Vendas', req.user.id);
+        // Registrar transação financeira
         transaction.set(db.collection('transactions').doc(), {
           owner_id: req.user.id,
           type: 'income', amount: order.total_amount, description: `Venda #${orderDoc.id}`,
@@ -1161,6 +1191,7 @@ app.put('/orders/:id/status', async (req, res, next) => {
           source: 'order_auto', source_order_id: orderDoc.id, created_at: nowIso(), updated_at: nowIso()
         });
 
+        // Finalizar pedido
         transaction.update(orderRef, { status, delivered_at: nowIso(), snapshot_items, updated_at: nowIso() });
       });
       return res.json({ ok: true });
