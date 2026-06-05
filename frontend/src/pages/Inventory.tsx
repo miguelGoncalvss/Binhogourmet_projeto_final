@@ -14,7 +14,7 @@ type MeasurementType = "mass" | "volume" | "unit";
 type UnitOption = "mg" | "g" | "kg" | "ml" | "L" | "un";
 
 type Ingredient = {
-  id: number;
+  id: string;
   name: string;
   measurement_type: MeasurementType;
   base_unit: UnitOption;
@@ -28,7 +28,9 @@ type IngredientForm = {
   name: string;
   measurement_type: MeasurementType;
   base_unit: UnitOption;
+  stock_qty_base: string;
   min_stock_qty_base: string;
+  last_cost_per_base_unit: string;
   notes: string;
 };
 
@@ -61,7 +63,9 @@ const emptyIngredientForm: IngredientForm = {
   name: "",
   measurement_type: "mass",
   base_unit: "g",
+  stock_qty_base: "0",
   min_stock_qty_base: "0",
+  last_cost_per_base_unit: "0",
   notes: "",
 };
 
@@ -165,7 +169,9 @@ export default function Inventory() {
         name: ingredientForm.name.trim(),
         measurement_type: ingredientForm.measurement_type,
         base_unit: ingredientForm.base_unit,
+        stock_qty_base: Number(ingredientForm.stock_qty_base || 0),
         min_stock_qty_base: Number(ingredientForm.min_stock_qty_base || 0),
+        last_cost_per_base_unit: Number(ingredientForm.last_cost_per_base_unit || 0),
         notes: ingredientForm.notes.trim() || null,
       });
       setIngredientDialogOpen(false);
@@ -214,7 +220,7 @@ export default function Inventory() {
       // Manda a lista toda pra nossa nova rota!
       await api.post("/ingredients/purchase", {
         items: purchaseList.map(item => ({
-          ingredient_id: Number(item.ingredient_id),
+          ingredient_id: item.ingredient_id,
           quantity: Number(item.quantity),
           purchase_unit: item.purchase_unit,
           total_cost: Number(item.total_cost),
@@ -286,6 +292,33 @@ export default function Inventory() {
                           <option key={u} value={u}>{u}</option>
                         ))}
                       </select>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="mb-1 block text-sm font-medium">
+                        Estoque inicial ({ingredientForm.base_unit})
+                      </label>
+                      <Input
+                        type="number"
+                        step="0.01"
+                        value={ingredientForm.stock_qty_base}
+                        onChange={(e) => setIngredientForm((s) => ({ ...s, stock_qty_base: e.target.value }))}
+                        placeholder="Ex: 1000"
+                      />
+                    </div>
+                    <div>
+                      <label className="mb-1 block text-sm font-medium">
+                        Custo p/ {ingredientForm.base_unit} (R$)
+                      </label>
+                      <Input
+                        type="number"
+                        step="0.01"
+                        value={ingredientForm.last_cost_per_base_unit}
+                        onChange={(e) => setIngredientForm((s) => ({ ...s, last_cost_per_base_unit: e.target.value }))}
+                        placeholder="Ex: 0.05"
+                      />
                     </div>
                   </div>
 

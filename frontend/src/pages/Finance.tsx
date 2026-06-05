@@ -17,7 +17,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from ".
 import { Camera, Wallet, FileText } from "lucide-react";
 
 type Account = {
-  id: number;
+  id: string;
   name: string;
   type: string;
   opening_balance: number;
@@ -25,15 +25,15 @@ type Account = {
   is_active: number;
 };
 
-type Category = { id: number; name: string; type: "income" | "expense" | "both"; is_personal: number };
+type Category = { id: string; name: string; type: "income" | "expense" | "both"; is_personal: number };
 
 type Transaction = {
-  id: number;
+  id: string;
   type: "income" | "expense";
   amount: number;
   description?: string | null;
-  account_id?: number | null;
-  category_id?: number | null;
+  account_id?: string | null;
+  category_id?: string | null;
   account_name?: string | null;
   category_name?: string | null;
   occurred_at: string;
@@ -41,7 +41,7 @@ type Transaction = {
 };
 
 type DasPayment = {
-  id: number;
+  id: string;
   year: number;
   month: number;
   status: "pending" | "paid" | "overdue";
@@ -211,7 +211,7 @@ export default function Finance() {
     } catch (err: any) { alert("Erro ao atualizar conta."); }
   }
 
-  async function deleteAccount(id: number) {
+  async function deleteAccount(id: string) {
     if (!window.confirm("Excluir esta conta?")) return;
     try {
       await api.delete(`/accounts/${id}`);
@@ -229,8 +229,8 @@ export default function Finance() {
         type: form.type,
         amount: Number(form.amount),
         description: form.description || null,
-        account_id: form.account_id ? Number(form.account_id) : null,
-        category_id: form.category_id ? Number(form.category_id) : null,
+        account_id: form.account_id || null,
+        category_id: form.category_id || null,
         occurred_at: isoDate,
         is_personal_withdrawal: form.is_personal_withdrawal ? 1 : 0,
         affects_mei_revenue: form.affects_mei_revenue ? 1 : 0,
@@ -241,7 +241,7 @@ export default function Finance() {
     } catch (err: any) { alert("Erro ao lançar transação."); }
   }
 
-  async function handleDeleteTransaction(id: number) {
+  async function handleDeleteTransaction(id: string) {
     if (!window.confirm("Excluir este lançamento?")) return;
     try {
       await api.delete(`/transactions/${id}`);
@@ -306,7 +306,7 @@ export default function Finance() {
           type: "expense",
           amount: Number(dasForm.amount),
           description: `Pagamento Guia DAS MEI - ${MONTH_NAMES[selectedDas.month - 1]}/${selectedDas.year}`,
-          account_id: Number(dasForm.account_id),
+          account_id: dasForm.account_id,
           category_id: null,
           occurred_at: new Date(`${dasForm.date}T12:00:00`).toISOString(),
           is_personal_withdrawal: 0,

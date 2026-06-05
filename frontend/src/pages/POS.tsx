@@ -127,10 +127,10 @@ export default function POS() {
     try {
       const payload = {
         customer_name: customerName.trim() || null,
-        client_id: clientId ? Number(clientId) : null,
+        client_id: clientId || null,
         channel,
         order_type: channel === "encomenda" ? "encomenda" : "balcao",
-        account_id: accountId ? Number(accountId) : null,
+        account_id: accountId || null,
         // ENVIANDO A DATA PRO BACKEND:
         delivery_date: deliveryDate ? new Date(deliveryDate).toISOString() : null, 
         items: cart.map((item) => ({

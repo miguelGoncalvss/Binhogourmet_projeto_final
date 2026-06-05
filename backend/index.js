@@ -751,8 +751,10 @@ app.post('/ingredients/purchase', async (req, res, next) => {
     const { items } = req.body || {};
     if (!Array.isArray(items) || items.length === 0) return res.status(400).json({ error: 'Nenhum item.' });
 
+    const movementRefs = items.map(() => db.collection('stock_movements').doc());
     await db.runTransaction(async (transaction) => {
-      for (const item of items) {
+      for (let i = 0; i < items.length; i++) {
+        const item = items[i];
         const { ingredient_id, quantity, purchase_unit, total_cost, note } = item;
         const ingRef = db.collection('ingredients').doc(ingredient_id);
         const doc = await transaction.get(ingRef);
@@ -769,8 +771,7 @@ app.post('/ingredients/purchase', async (req, res, next) => {
           updated_at: nowIso()
         });
 
-        const movementRef = db.collection('stock_movements').doc();
-        transaction.set(movementRef, {
+        transaction.set(movementRefs[i], {
           owner_id: req.user.id,
           ingredient_id, movement_type: 'purchase', quantity_base: qtyBase,
           unit_base: ing.base_unit || ing.unit, unit_cost_base: unitCost,
